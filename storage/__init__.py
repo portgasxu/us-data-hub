@@ -200,6 +200,31 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_cooldown_symbol_dir ON signal_cooldowns(symbol, direction);
             CREATE INDEX IF NOT EXISTS idx_cooldown_until ON signal_cooldowns(cooldown_until);
 
+            -- P0 审计修复: 系统配置表（Kill Switch 等运行时配置）
+            CREATE TABLE IF NOT EXISTS system_config (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
+            -- P0 审计修复: 系统配置表（Kill Switch 等运行时配置）
+            CREATE TABLE IF NOT EXISTS system_config (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
+            -- P0 审计修复: system_config 表（Kill Switch 等运行时配置）
+            CREATE TABLE IF NOT EXISTS system_config (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
+            -- P0 审计修复: trades 表 signal_id 唯一约束（防止重复下单）
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_signal_once
+                ON trades(signal_id) WHERE status IN ('submitted', 'filled', 'partial');
+
             -- v6.0: Execution log (one row per auto_execute --full-loop run)
             CREATE TABLE IF NOT EXISTS execution_log (
                 execution_id TEXT PRIMARY KEY,
@@ -492,6 +517,19 @@ class Database:
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_execution_id ON trades(execution_id)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_signal_id ON monitor_alerts(signal_id)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_execution_id ON monitor_alerts(execution_id)")
+        except Exception:
+            pass
+
+        # 8. 审计优化: system_config 表（Kill Switch DB 版）
+        try:
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS system_config (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            logger.info("Migration: added system_config table")
         except Exception:
             pass
 

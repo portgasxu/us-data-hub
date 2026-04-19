@@ -8,6 +8,7 @@ Docs: https://open.longportapp.com/docs/cli/intro
 import subprocess
 import json
 import re
+import time
 import argparse
 import logging
 from typing import Dict, List, Optional
@@ -22,23 +23,45 @@ class LongbridgeExecutor:
         self.cli_path = cli_path
         self.symbol_suffix = symbol_suffix
 
-    def _run(self, args: list, timeout: int = 30) -> Optional[Dict]:
-        """Run CLI command, return parsed JSON or None."""
+    def _run(self, args: list, timeout: int = 30, retries: int = 2) -> Optional[Dict]:
+        """Run CLI command with retry (P1 审计修复: 指数退避重试).
+        
+        Args:
+            args: CLI arguments
+            timeout: seconds per attempt
+            retries: number of retry attempts (default 2)
+        """
         cmd = [self.cli_path] + args
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-            if result.returncode != 0:
-                logger.error(f"Longbridge CLI error: {' '.join(cmd)} → {result.stderr[:200]}")
-                return None
-            # Try JSON first
+        last_error = None
+
+        for attempt in range(1 + retries):
             try:
-                return json.loads(result.stdout)
-            except json.JSONDecodeError:
-                # CLI returns table format for some commands; parse as JSON by caller
-                return None
-        except Exception as e:
-            logger.error(f"Longbridge CLI failed: {e}")
-            return None
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+                if result.returncode != 0:
+                    err_msg = result.stderr[:200]
+                    last_error = f"CLI error: {' '.join(cmd)} → {err_msg}"
+                    logger.error(f"[Attempt {attempt+1}/{1+retries}] {last_error}")
+                else:
+                    # Try JSON first
+                    try:
+                        return json.loads(result.stdout)
+                    except json.JSONDecodeError:
+                        return None  # CLI returns table format for some commands
+
+            except subprocess.TimeoutExpired:
+                last_error = f"CLI timeout: {' '.join(cmd)}"
+                logger.error(f"[Attempt {attempt+1}/{1+retries}] {last_error}")
+            except Exception as e:
+                last_error = f"CLI failed: {e}"
+                logger.error(f"[Attempt {attempt+1}/{1+retries}] {last_error}")
+
+            if attempt < retries:
+                wait = 2 ** attempt  # 1s, 2s exponential backoff
+                logger.info(f"Retrying in {wait}s...")
+                time.sleep(wait)
+
+        logger.error(f"All {1+retries} attempts failed for: {' '.join(cmd)}")
+        return None
 
     def get_quote(self, symbol: str) -> Optional[Dict]:
         """Get real-time quote."""

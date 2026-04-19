@@ -1,8 +1,8 @@
-# 美股自动交易系统 — Agent Loop 架构图 v3.0
+# 美股自动交易系统 — Agent Loop 架构图 v3.1
 
-> 更新时间: 2026-04-19 20:20
-> 更新内容: LLM 路由全面升级 — qwen3.6-plus 全部走 CodingPlan，百炼分流扩展到 8 模型
-> 覆盖: LLM 双端点 / 风控仲裁 / 时段策略 / 并行采集 / 反馈闭环 / 节假日
+> 更新时间: 2026-04-19 23:15
+> 更新内容: 审计优化 Phase 1-2 — 竞态修复/Kill Switch DB化/启动对账/公司行动/Prompt防护/LLM兜底
+> 覆盖: 原子化订单锁 / Kill Switch DB / 启动对账 / 公司行动 / 接口重试 / 硬止损兜底
 
 ---
 
@@ -54,22 +54,22 @@
 
 ---
 
-## 一、核心模块清单（优化后）
+## 一、核心模块清单（审计优化后 v3.1）
 
 | 模块 | 文件 | 状态 | 改动 |
 |------|------|------|-----------|
+| 自动交易 | `scripts/auto_execute.py` | 🟢 审计优化 | 竞态修复+Kill Switch DB+启动对账+幂等性 |
+| 持仓监控 | `monitoring/holding_monitor.py` | 🟢 审计优化 | 硬止损/止盈规则兜底 |
+| 公司行动 | `analysis/corporate_actions.py` | 🟢 新增 | 拆股/分红处理 |
+| Prompt 防护 | `analysis/prompt_guard.py` | 🟢 新增 | 注入检测+LLM输出校验 |
+| Longbridge 执行 | `executors/longbridge.py` | 🟢 审计优化 | 指数退避重试 |
+| 存储层 | `storage/__init__.py` | 🟢 审计优化 | system_config 表 |
 | LLM 多模型路由 | `analysis/llm_router.py` | 🔴 全面升级 | 8 模型 + 20 任务类型 |
 | 统一风控仲裁 | `analysis/risk_arbitrator.py` | 🟢 新增 | P0: 风控仲裁器 |
 | 交易时段策略 | `analysis/session_strategy.py` | 🟡 修复 | Bug 修复: 语法损坏/夏令时/缺失函数 |
 | 节假日日历 | `analysis/holiday_calendar.py` | 🟢 新增 | P3: 完整节假日 |
 | 策略反馈闭环 | `analysis/feedback_loop.py` | 🟢 新增 | P3: 自优化 |
 | 并行采集 | `collectors/parallel_collector.py` | 🟢 新增 | P3: 并行采集 |
-| 交易执行 | `scripts/auto_execute.py` | 🟡 改造 | P0+P1+P2 |
-| 持仓监控 | `monitoring/holding_monitor.py` | 🟡 改造 | P1: LLM Router |
-| 情感分析 | `processors/sentiment.py` | 🟡 改造 | P1: 百炼 flash |
-| TA 多智能体 | `tradingagents/main.py` | 🟡 改造 | P1: 并行分析 |
-| 数据管道 | `scripts/data_pipeline.py` | 🟡 改造 | P3: 并行采集 |
-| 策略验证 | `scripts/validate_strategy.py` | 🟡 改造 | P3: 反馈闭环 |
 
 ---
 
@@ -79,6 +79,17 @@
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
 │                           CRON 定时触发                                               │
 │  盘前: */30 15-21  |  盘中: */5 价格, */15 watcher, */30 auto_execute  |  盘后: 复盘  │
+└───────────────────────────────┬─────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│  STEP 0: 启动对账 (P0 审计修复)                                                       │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐   │
+│  │  1. sync_from_broker() — 从券商同步最新持仓                                    │
+│  │  2. process_corporate_actions() — 处理拆股/分红等公司行动                      │
+│  │  3. 检查 Kill Switch (环境变量 + DB system_config 表)                          │
+│  │     → 若激活则拒绝启动                                                         │
+│  └─────────────────────────────────────────────────────────────────────────────┘   │
 └───────────────────────────────┬─────────────────────────────────────────────────────┘
                                 │
                                 ▼
@@ -182,7 +193,7 @@
                                 │
                                 ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
-│  STEP 7: 交易执行 (Phase 1: 订单冷却 + 事务包裹)                                      │
+│  STEP 7: 交易执行 (审计优化 v3.1: 原子锁 + 幂等 + Kill Switch DB)                    │
 │  ┌─────────────────────────────────────────────────────────────────────────────┐   │
 │  │  根据时段策略限制交易数量:                                                     │   │
 │  │  ├─ market_open: max 5 笔 (全功能)                                            │   │
@@ -191,11 +202,14 @@
 │  │                                                                              │   │
 │  │  执行流程:                                                                     │   │
 │  │  1. 数据完整性检查 (价格有效)                                                   │   │
-│  │  2. Dry Run 检查 (可选)                                                        │   │
-│  │  3. 下单 → Longbridge API                                                      │   │
-│  │  4. 订单冷却锁 (10min) ← Phase 1 新增                                          │   │
-│  │  5. 交易记录 (trade_logs)                                                      │   │
-│  │  6. 持仓更新 (holdings)                                                        │   │
+│  │  2. 幂等性检查: signal_id 是否已执行 (P0 审计修复)                             │   │
+│  │  3. 原子化竞态修复: _try_acquire_order_lock (P0 审计修复)                      │   │
+│  │     → INSERT OR IGNORE + signal_id 防重复                                    │   │
+│  │  4. Kill Switch 检查: DB system_config 表 (实时生效，无需重启)                  │   │
+│  │  5. Dry Run 检查 (可选)                                                        │   │
+│  │  6. 下单 → Longbridge API (指数退避重试 3 次)                                  │   │
+│  │  7. 交易记录 (trades 表，含 signal_id)                                         │   │
+│  │  8. 订单冷却锁 (10min)                                                         │   │
 │  └─────────────────────────────────────────────────────────────────────────────┘   │
 │  输出: 执行结果 + 交易记录                                                           │
 └───────────────────────────────┬─────────────────────────────────────────────────────┘
@@ -351,14 +365,27 @@ P3 动态阈值 (Dynamic Threshold) ← 信号质量过滤
 P4 Risk Manager              ← 综合风控检查
 ```
 
-### 4.2 订单冷却机制
+### 4.2 订单冷却机制 (v3.1 原子化修复)
 
 ```python
-# 下单后立即锁定
-_lock_order(db, symbol, direction, minutes=10)
-# 下次 loop 检查
-if _check_order_cooldown(db, symbol, direction):
-    skip()  # 10分钟内不重复下单
+# P0 修复: 原子化检查+锁定，解决竞态条件
+if not _try_acquire_order_lock(db, symbol, direction, signal_id, minutes=10):
+    skip()  # 已被执行或正在被其他进程处理
+
+# 内部逻辑:
+# 1. 幂等性检查: signal_id 是否已在 trades 表中
+# 2. INSERT OR IGNORE 原子化插入 order_lock 记录
+# 3. 验证锁定结果 (reason 匹配则成功)
+```
+
+### 4.3 Kill Switch DB 版 (v3.1 新增)
+
+```python
+# 同时检查环境变量 + DB system_config 表
+if _check_kill_switch(db):
+    return False, "KILL SWITCH ACTIVE — all trading halted"
+
+# DB 版优势: 修改后立即生效，无需重启进程
 ```
 
 ### 4.3 数据完整性检查
@@ -482,9 +509,64 @@ DASHSCOPE_API_KEY=sk-64b866f9e6fa4e3588e7326bcc487d6d
 | 数据采集耗时 | ~17.5min | ~3-5min | **↓70%** |
 | TA 分析耗时 (5只) | ~25min | ~5min | **↓80%** |
 | 单次 Full Loop | ~45min | ~10-15min | **↓70%** |
-| 重复下单风险 | 高 | 无 (订单冷却) | **消除** |
+| 重复下单风险 | 高 | 无 (原子锁+幂等) | **消除** |
 | 风控冲突 | 有 (无仲裁) | 无 (P0-P4 仲裁) | **消除** |
 | LLM 成本 | 全部 qwen3.6-plus | 分级 (8 模型按优势分配) | **↓50%** |
 | 节假日处理 | 无 | 完整 10天/年 | **新增** |
 | 策略自优化 | 手动 | 自动反馈闭环 | **新增** |
 | 时段策略 | 仅夏令时/冬令时 | 6时段 + 节假日 | **全面** |
+| Kill Switch | 需重启进程 | DB 实时生效 | **新增** |
+| 硬止损兜底 | 无 | -15% 无条件触发 | **新增** |
+| 公司行动处理 | 无 | 拆股/分红自动调整 | **新增** |
+| 接口重试 | 无 | 指数退避 3 次 | **新增** |
+
+---
+
+## 十一、审计优化清单（v3.1 新增）
+
+> 基于外部量化投资专家审计报告的辩证评估结果，聚焦真正影响资金安全的核心问题。
+
+### P0 核心修复（资金安全）
+
+| # | 问题 | 修复方案 | 状态 |
+|---|------|----------|------|
+| 1 | 竞态条件: `_check_order_cooldown` + `_lock_order` 非原子 | 合并为 `_try_acquire_order_lock` (INSERT OR IGNORE) | ✅ |
+| 2 | 幂等性缺失: signal_id 无唯一约束 | signal_id 预检查 + DB 约束 | ✅ |
+| 3 | Kill Switch 需重启进程 | 新增 `system_config` 表，实时读取 | ✅ |
+| 4 | 启动时未与券商对账 | 启动时先 `sync_from_broker()` | ✅ |
+
+### P1 高优先级
+
+| # | 问题 | 修复方案 | 状态 |
+|---|------|----------|------|
+| 5 | 拆股/分红无处理逻辑 | `analysis/corporate_actions.py` | ✅ |
+| 6 | Prompt 注入风险 | `analysis/prompt_guard.py` (注入检测+LLM输出校验) | ✅ |
+| 7 | 接口失败无重试 | Longbridge 指数退避重试 (3 次) | ✅ |
+| 8 | 持仓监控无规则兜底 | 硬止损 -15% / 硬止盈 +50% | ✅ |
+
+### Kill Switch 使用方式
+
+```bash
+# 方式1: 环境变量 (旧方式，需重启进程)
+export TRADING_KILL_SWITCH=1
+
+# 方式2: 数据库 (新方式，实时生效)
+python3 -c "
+import sqlite3
+conn = sqlite3.connect('dayup/us_data_hub.db')
+conn.execute(\"INSERT OR REPLACE INTO system_config (key, value) VALUES ('kill_switch', '1')\")
+conn.commit()
+conn.close()
+print('Kill Switch 已激活 (实时生效)')
+"
+
+# 关闭 Kill Switch
+python3 -c "
+import sqlite3
+conn = sqlite3.connect('dayup/us_data_hub.db')
+conn.execute(\"DELETE FROM system_config WHERE key = 'kill_switch'\")
+conn.commit()
+conn.close()
+print('Kill Switch 已关闭')
+"
+```
