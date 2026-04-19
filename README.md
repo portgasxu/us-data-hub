@@ -4,6 +4,7 @@
 
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10+-green.svg)](https://www.python.org/)
+[![Version](https://img.shields.io/badge/v3.1-审计优化版-orange.svg)](CHANGELOG.md)
 
 ---
 
@@ -16,6 +17,17 @@
 - **并行数据采集** — 7 只股票 × 5 数据源并行采集，耗时从 17min 降至 3-5min
 - **策略反馈闭环** — 胜率/Sharpe/回撤自动反馈 → 动态调整选股权重
 - **全链路可追溯** — Trace ID + Event Bus + 结构化日志
+
+### 🛡️ v3.1 审计优化新增
+
+- **原子化竞态修复** — `_try_acquire_order_lock` 合并检查+锁定，消除重复下单风险
+- **幂等性保证** — signal_id 预检查 + DB 唯一约束，同一信号不重复执行
+- **Kill Switch DB 版** — 实时生效，无需重启进程
+- **启动对账机制** — 系统启动时自动同步券商持仓 + 处理公司行动
+- **公司行动处理** — 拆股/分红自动识别与持仓调整
+- **硬止损/止盈兜底** — 不受 LLM 影响的硬性规则（-15% 止损 / +50% 止盈）
+- **Prompt 注入防护** — 外部内容清洗 + LLM 输出校验
+- **接口重试机制** — Longbridge 指数退避重试（3 次）
 
 ---
 
@@ -59,7 +71,9 @@ us-data-hub/
 │   ├── dynamic_threshold.py   # 动态阈值计算
 │   ├── circuit_breaker.py     # 熔断器
 │   ├── screener.py            # 三层选股
-│   └── market_regime.py       # 市场状态识别
+│   ├── market_regime.py       # 市场状态识别
+│   ├── corporate_actions.py   # 🆕 公司行动处理（拆股/分红）
+│   └── prompt_guard.py        # 🆕 Prompt 注入防护 + LLM 输出校验
 │
 ├── collectors/            # 数据采集
 │   ├── parallel_collector.py    # 并行采集引擎
@@ -75,7 +89,7 @@ us-data-hub/
 │   └── shadow_executor.py       # 影子执行（Dry Run）
 │
 ├── monitoring/            # 监控
-│   └── holding_monitor.py       # 持仓监控
+│   └── holding_monitor.py       # 持仓监控（LLM 动态分析 + 硬止损/止盈兜底）
 │
 ├── management/            # 管理
 │   └── position_manager.py      # 仓位管理
@@ -202,7 +216,7 @@ CodingPlan 失败 → 百炼同模型 → qwen3.6-flash（末端兜底）
 
 ## 🔒 风控体系
 
-五级优先级仲裁：
+### 五级优先级仲裁
 
 | 优先级 | 检查项 | 动作 |
 |--------|--------|------|
@@ -211,6 +225,19 @@ CodingPlan 失败 → 百炼同模型 → qwen3.6-flash（末端兜底）
 | **P2** | 信号 cooldown | 信号去重 |
 | **P3** | 动态阈值 | 信号质量过滤 |
 | **P4** | 综合风控 | 最终检查 |
+
+### v3.1 安全增强
+
+| 特性 | 说明 |
+|------|------|
+| **原子化竞态修复** | `_try_acquire_order_lock` 合并检查+锁定，消除并发冲突 |
+| **幂等性** | signal_id 预检查 + DB 唯一约束，同一信号不重复执行 |
+| **Kill Switch DB** | `system_config` 表存储，修改后实时生效，无需重启 |
+| **启动对账** | 每次启动先 `sync_from_broker()` 同步券商持仓 |
+| **硬止损/止盈** | -15% 无条件止损 / +50% 无条件止盈（LLM 无法覆盖） |
+| **公司行动处理** | 拆股/分红自动识别与持仓成本调整 |
+| **Prompt 防护** | 外部内容注入检测 + LLM 输出格式/范围校验 |
+| **接口重试** | Longbridge 指数退避重试（3 次，最大 4s 退避） |
 
 ---
 
@@ -236,8 +263,12 @@ CodingPlan 失败 → 百炼同模型 → qwen3.6-flash（末端兜底）
 | 数据采集耗时 | ~17.5 min | ~3-5 min |
 | 多智能体分析 (5只) | ~25 min | ~5 min |
 | 单次完整 Loop | ~45 min | ~10-15 min |
-| 重复下单风险 | 高 | 消除 |
+| 重复下单风险 | 高 | 消除（原子锁+幂等） |
 | LLM 成本 | 全部高配 | 分级分流，降低 ~50% |
+| Kill Switch | 需重启进程 | DB 实时生效 |
+| 硬止损/止盈 | 无 | -15% / +50% 兜底 |
+| 公司行动处理 | 无 | 拆股/分红自动调整 |
+| 接口重试 | 无 | 指数退避 3 次 |
 
 ---
 
@@ -269,4 +300,6 @@ MIT License — 详见 [LICENSE](LICENSE)
 
 ---
 
-> 🤖 本系统使用 AI 辅助构建，持续迭代中。如有问题欢迎提交 Issue。
+> 🤖 本系统使用 AI 辅助构建，持续迭代中。v3.1 审计优化详见 [CHANGELOG.md](CHANGELOG.md)
+> 
+> 📐 详细架构图 → [docs/agent_loop_diagram_v2.md](docs/agent_loop_diagram_v2.md)
