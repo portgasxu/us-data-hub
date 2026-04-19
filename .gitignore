@@ -1,0 +1,83 @@
+# ═══════════════════════════════════════════════════════
+# US Data Hub — Git Ignore
+# ═══════════════════════════════════════════════════════
+
+# ── Secrets (NEVER commit these) ──────────────────────
+.env
+.env.local
+.env.production
+*.key
+*.pem
+secrets/
+
+# ── Python ────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Virtual environments ─────────────────────────────
+venv/
+env/
+.venv/
+.env/
+
+# ── Data & Storage (local runtime data) ───────────────
+data/*.db
+data/*.db.backup
+data/*.sqlite
+data/raw/
+data/processed/
+data/screening-results/
+
+# ── Logs & Output ─────────────────────────────────────
+logs/
+output/
+*.log
+results/*.json
+results/**/TradingAgentsStrategy_logs/
+
+# ── Temp files ────────────────────────────────────────
+temp/
+*.tmp
+*.swp
+*.swo
+*~
+
+# ── IDE & Editor ─────────────────────────────────────
+.vscode/
+.idea/
+*.sublime-*
+.project
+.pydevproject
+
+# ── OS files ──────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── TradingAgents runtime data ────────────────────────
+tradingagents/results/*.json
+tradingagents/results/**/TradingAgentsStrategy_logs/
+
+# ── Dayup runtime data ───────────────────────────────
+dayup/market/
+dayup/positions/
+dayup/trades/
+dayup/risk/
+dayup/strategy/
+dayup/reviews/
+dayup/errors/
+dayup/events/
+dayup/performance/
+dayup/system/
+
+# ── Crontab backups ──────────────────────────────────
+crontab-backup-*.txt
+
+# ── Large/generated files ────────────────────────────
+uv.lock
+*.bak

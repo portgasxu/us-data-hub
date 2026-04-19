@@ -1,0 +1,59 @@
+{
+  "version": "1.0",
+  "last_updated": "2026-04-19T15:56:23.360080",
+  "screener_weights": {
+    "momentum": 0.39999999999999997,
+    "value": 0.15000000000000002,
+    "growth": 0.15000000000000002,
+    "quality": 0.15,
+    "sentiment": 0.15
+  },
+  "dynamic_thresholds": {
+    "min_confidence": 0.7000000000000001,
+    "min_volume": 1000000,
+    "min_market_cap": 1000000000.0
+  },
+  "hot_industries": [
+    "Technology",
+    "Healthcare",
+    "Consumer Cyclical"
+  ],
+  "excluded_industries": [
+    "Real Estate",
+    "Utilities"
+  ],
+  "optimization_history": [
+    {
+      "timestamp": "2026-04-19T15:51:13.054611",
+      "label": "test",
+      "win_rate": 0.42,
+      "total_trades": 50,
+      "best_symbol": "NVDA",
+      "worst_symbol": "TSLA",
+      "sharpe": 1.8,
+      "max_drawdown": 0.12,
+      "changes": [
+        "min_confidence: 0.60 → 0.65 (胜率 42% 过低)",
+        "momentum weight: 0.30 → 0.35 (Sharpe 1.8)",
+        "best_performer added: NVDA"
+      ]
+    },
+    {
+      "timestamp": "2026-04-19T15:56:23.360053",
+      "label": "test",
+      "win_rate": 0.42,
+      "total_trades": 50,
+      "best_symbol": "NVDA",
+      "worst_symbol": "TSLA",
+      "sharpe": 1.8,
+      "max_drawdown": 0.12,
+      "changes": [
+        "min_confidence: 0.65 → 0.70 (胜率 42% 过低)",
+        "momentum weight: 0.35 → 0.40 (Sharpe 1.8)"
+      ]
+    }
+  ],
+  "best_performers": [
+    "NVDA"
+  ]
+}

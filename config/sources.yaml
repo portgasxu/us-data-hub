@@ -1,0 +1,63 @@
+# US Data Hub — Data Sources Configuration
+
+proxy:
+  enabled: true
+  http: "http://127.0.0.1:7890"
+  https: "http://127.0.0.1:7890"
+
+sources:
+  sec:
+    enabled: true
+    name: "SEC EDGAR"
+    base_url: "https://data.sec.gov"
+    filing_url: "https://www.sec.gov/Archives/edgar/data"
+    search_url: "https://efts.sec.gov/LATEST/search-index"
+    user_agent: "USDataHub admin@localhost"
+    rate_limit: 5  # requests per second
+    requires_proxy: false
+
+  google_news:
+    enabled: true
+    name: "Google News RSS"
+    base_url: "https://news.google.com/rss"
+    search_url: "https://news.google.com/rss/search"
+    requires_proxy: true
+    rate_limit: 1  # requests per 5 seconds
+
+  longbridge:
+    enabled: true
+    name: "Longbridge CLI"
+    cli_path: "longbridge"
+    requires_proxy: true
+    rate_limit: 1  # requests per 2 seconds
+    oauth_required: true
+
+  reddit:
+    enabled: true
+    name: "Reddit API"
+    base_url: "https://www.reddit.com"
+    user_agent: "linux:us-data-hub:v0.1"
+    subreddits:
+      - wallstreetbets
+      - investing
+      - stocks
+      - StockMarket
+    requires_proxy: true
+    rate_limit: 1  # requests per 2 seconds
+
+# Default watchlist
+watchlist:
+  - AAPL
+  - MSFT
+  - GOOGL
+  - AMZN
+  - TSLA
+  - NVDA
+  - META
+
+# Storage
+storage:
+  db_path: "data/us_data_hub.db"
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  max_age_days: 365  # retain data for 1 year

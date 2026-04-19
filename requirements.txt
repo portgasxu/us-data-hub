@@ -1,0 +1,34 @@
+# US Data Hub — Requirements
+
+# Core (already installed)
+pandas>=2.0
+numpy>=1.24
+
+# Storage
+# sqlite3 — Python stdlib (no install needed)
+# duckdb — Optional, for analytical queries
+# duckdb>=0.9
+
+# Config
+pyyaml>=6.0
+
+# Data collection
+# Uses stdlib urllib.request (no additional deps for basic collectors)
+# For enhanced collectors:
+# requests>=2.31
+# beautifulsoup4>=4.12
+
+# Sentiment analysis
+# Built-in keyword-based (no deps)
+# For LLM-based:
+# openai>=1.0
+
+# Scheduling
+# apscheduler>=3.10
+
+# MCP Server (future)
+# fastmcp>=0.1
+
+# MCP Server alternative
+# fastapi>=0.100
+# uvicorn>=0.23
