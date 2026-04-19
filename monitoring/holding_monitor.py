@@ -45,6 +45,20 @@ class HoldingMonitor:
         # 保持旧接口兼容，但实际通过 Router 调用
         return self._get_router()
 
+    def _has_sell_trades(self, symbol: str) -> bool:
+        """检查该标的是否曾经卖出过（减仓锁定利润）。
+        
+        这是判断"零成本持仓"的唯一依据——不依赖 P&L 百分比。
+        """
+        try:
+            row = self.db.conn.execute(
+                "SELECT COUNT(*) FROM trades WHERE symbol = ? AND direction = 'sell'",
+                (symbol,)
+            ).fetchone()
+            return row and row[0] > 0
+        except Exception:
+            return False
+
     # ═══════════════════════════════════════════════════════
     # 主入口：LLM 动态分析
     # ═══════════════════════════════════════════════════════
@@ -146,17 +160,16 @@ class HoldingMonitor:
                 pnl_pct = h.get('pnl_pct', 0) or 0
                 weight = h.get('weight', 0) or 0
 
-                # 关键：摊薄成本法下，P&L 可能极大（>1000%），
-                # 这意味着之前减仓已锁定利润，剩余是零成本持仓
-                is_low_cost = pnl_pct > 1.0  # P&L > 100% 说明成本已大幅摊薄
-                pnl_note = " ⚠️ 已实现大部分利润，剩余为零成本持仓" if is_low_cost else ""
+                # 关键：直接查交易记录判断是否曾经减仓（而非猜测 P&L）
+                has_sold = self._has_sell_trades(h['symbol'])
+                sold_note = " ✅ 已减仓过（利润已锁定，剩余为零成本持仓）" if has_sold else ""
 
                 line = (
                     f"- {h['symbol']} ({h['name']}): "
                     f"成本${h['cost']:.2f} → 现价${h['price']:.2f} (P&L {pnl_pct:+.1%}), "
                     f"权重{weight:.1%}, 趋势{trend} (MA5={ma5_str}/MA20={ma20_str}), "
                     f"波动{vol}, 情绪{sentiment_score}, Agent信号={signal}"
-                    f"{pnl_note}"
+                    f"{sold_note}"
                 )
                 context_lines.append(line)
 
@@ -167,13 +180,12 @@ class HoldingMonitor:
 
 ## 重要说明
 - 成本价使用券商的**摊薄成本法**：当你减仓获利后，剩余持仓的成本会被利润摊薄
-- **如果 P&L 超过 100%，说明该标的之前已减仓锁定大部分利润，剩余仓位基本零成本、零风险**
-- 零成本持仓不需要急着止盈，因为没有本金在风险中
-- 只有当前景恶化或技术面明确反转时，才应该对零成本仓位止盈
+- 标注"已减仓"的标的：之前已经卖出部分仓位锁定了利润，剩余仓位基本零成本、零风险
+- 未标注的标的：正常持仓，成本和风险对等
 
 ## 分析要求
-1. 对于零成本持仓（P&L > 100%）：重点评估趋势是否还在，而不是 P&L 绝对值
-2. 对于正常持仓（P&L < 100%）：综合评估止盈时机
+1. 对于"已减仓"的零成本持仓：重点评估趋势是否还在，而不是 P&L 绝对值。趋势还在就继续持有
+2. 对于正常持仓：综合评估止盈/止损时机
 3. 不是简单的固定阈值判断，需要综合评估
 4. 如果某只标的趋势向上但短期回调，可以建议持有
 5. 如果趋势向下且情绪恶化，即使未触及固定止损线也应建议减仓
