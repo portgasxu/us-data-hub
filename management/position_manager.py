@@ -52,37 +52,6 @@ class PositionManager:
             return row['cost_price']
         return 0.0
 
-    def _calculate_cost_from_trades(self, symbol: str) -> float:
-        """从本地交易记录计算持仓成本价（加权平均法）。
-        
-        比券商返回的成本价更可靠，因为券商可能使用不同的会计方法
-        或返回过时数据。
-        """
-        rows = self.db.conn.execute("""
-            SELECT direction, quantity, price FROM trades 
-            WHERE symbol = ? AND quantity > 0 AND price > 0
-            ORDER BY timestamp ASC
-        """, (symbol,)).fetchall()
-        
-        if not rows:
-            return 0.0
-        
-        total_cost = 0.0
-        total_qty = 0
-        
-        for direction, qty, price in rows:
-            if direction.lower() == 'buy':
-                total_cost += qty * price
-                total_qty += qty
-            elif direction.lower() == 'sell':
-                # 卖出时按比例减少总成本，但不改变剩余股份的单位成本
-                if total_qty > 0:
-                    sell_ratio = qty / total_qty
-                    total_cost *= (1 - sell_ratio)
-                    total_qty -= qty
-        
-        return total_cost / total_qty if total_qty > 0 else 0.0
-
     def sync_from_broker(self) -> int:
         """
         Sync current positions from Longbridge broker.
@@ -164,14 +133,11 @@ class PositionManager:
             #   negative  = short position → active (needs cover)
             active_flag = 1 if quantity != 0 else 0
 
-            # Use our own trade history to calculate cost basis (more reliable than broker)
-            # Broker cost can be wrong (e.g., NVDA returned $5.56 instead of ~$200)
-            local_cost = self._calculate_cost_from_trades(symbol)
-            
-            # Only fall back to broker cost if we have no local trade data
-            effective_cost = local_cost if local_cost > 0 else cost_price
+            # 使用券商返回的成本价（摊薄成本法）
+            # 券商在卖出获利后会摊薄剩余成本，这更准确地反映真实风险
+            effective_cost = cost_price
 
-            # Upsert: update quantity from broker, use our calculated cost
+            # Upsert: 同步券商的数量和成本价
             self.db.conn.execute("""
                 INSERT INTO holdings (symbol, company_name, quantity, cost_price, available, last_synced)
                 VALUES (?, ?, ?, ?, ?, ?)
