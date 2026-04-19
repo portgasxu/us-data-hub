@@ -103,10 +103,6 @@ class HoldingMonitor:
             llm_alerts = self._llm_risk_analysis(holding_data)
             alerts.extend(llm_alerts)
 
-            # ── P1 审计修复: 硬止损/止盈规则兜底（LLM 失效时的安全网）───
-            hard_alerts = self._hard_rule_check(holding_data)
-            alerts.extend(hard_alerts)
-
             # ── Watchlist 新机会提示 ──
             held_symbols = set(h['symbol'] for h in holding_data)
             try:
@@ -310,65 +306,6 @@ class HoldingMonitor:
                 'severity': 'warning',
             })
 
-        return alerts
-
-    # ═══════════════════════════════════════════════════════
-    # P1 审计修复: 硬止损/止盈规则兜底
-    # ═══════════════════════════════════════════════════════
-
-    HARD_STOP_LOSS = -0.15   # 硬止损: -15%（LLM 无法覆盖）
-    HARD_TAKE_PROFIT = 0.50  # 硬止盈: +50%（LLM 无法覆盖）
-    HARD_CONSECUTIVE_LOSS_DAYS = 3  # 连续下跌天数触发硬止损
-
-    def _hard_rule_check(self, holding_data: list) -> list:
-        """P1 审计修复: 规则兜底 — 不受 LLM 影响的硬性止损止盈。
-        
-        即使 LLM 判断为 HOLD，如果触发硬规则，也必须生成告警。
-        """
-        alerts = []
-        
-        for h in holding_data:
-            symbol = h['symbol']
-            pnl_pct = h.get('pnl_pct', 0) or 0
-            
-            # 硬止损: P&L <= -15% 无条件触发
-            if pnl_pct <= self.HARD_STOP_LOSS:
-                alerts.append({
-                    'type': 'hard_stop_loss',
-                    'symbol': symbol,
-                    'message': f'{symbol}: 硬止损触发! P&L {pnl_pct:+.1%} <= {self.HARD_STOP_LOSS:+.0%}',
-                    'severity': 'critical',
-                    'confidence': 1.0,  # 规则触发，最高置信度
-                    'pnl_pct': pnl_pct,
-                })
-                log_risk(
-                    risk_type='硬止损',
-                    trigger=f'{symbol} P&L {pnl_pct:+.1%}',
-                    current=f'pnl={pnl_pct:+.1%}',
-                    threshold=f'hard_stop={self.HARD_STOP_LOSS:+.0%}',
-                    action='强制: STOP_LOSS'
-                )
-                logger.critical(f"🚨 [{symbol}] HARD STOP LOSS: {pnl_pct:+.1%}")
-            
-            # 硬止盈: P&L >= +50% 无条件触发
-            elif pnl_pct >= self.HARD_TAKE_PROFIT:
-                alerts.append({
-                    'type': 'hard_take_profit',
-                    'symbol': symbol,
-                    'message': f'{symbol}: 硬止盈触发! P&L {pnl_pct:+.1%} >= {self.HARD_TAKE_PROFIT:+.0%}',
-                    'severity': 'warning',
-                    'confidence': 1.0,
-                    'pnl_pct': pnl_pct,
-                })
-                log_risk(
-                    risk_type='硬止盈',
-                    trigger=f'{symbol} P&L {pnl_pct:+.1%}',
-                    current=f'pnl={pnl_pct:+.1%}',
-                    threshold=f'hard_tp={self.HARD_TAKE_PROFIT:+.0%}',
-                    action='建议: TAKE_PROFIT'
-                )
-                logger.warning(f"⚠️ [{symbol}] HARD TAKE PROFIT: {pnl_pct:+.1%}")
-        
         return alerts
 
     # ═══════════════════════════════════════════════════════
