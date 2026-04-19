@@ -73,6 +73,33 @@ class HoldingMonitor:
         except Exception:
             return False
 
+    def _get_sell_trades(self, symbol: str) -> list:
+        """获取该标的的所有卖出订单详情，供 LLM 参考。
+        
+        Returns:
+            list of dicts: [{date, direction, qty, price, signal}]
+        """
+        try:
+            rows = self.db.conn.execute("""
+                SELECT timestamp, direction, quantity, price, agent_signal
+                FROM trades
+                WHERE symbol = ? AND direction = 'sell'
+                ORDER BY timestamp ASC
+            """, (symbol,)).fetchall()
+            
+            return [
+                {
+                    'date': r[0][:16],  # YYYY-MM-DD HH:MM
+                    'direction': r[1],
+                    'qty': r[2],
+                    'price': r[3],
+                    'signal': r[4] or 'N/A',
+                }
+                for r in rows
+            ]
+        except Exception:
+            return []
+
     # ═══════════════════════════════════════════════════════
     # 主入口：LLM 动态分析
     # ═══════════════════════════════════════════════════════
@@ -174,28 +201,43 @@ class HoldingMonitor:
                 pnl_pct = h.get('pnl_pct', 0) or 0
                 weight = h.get('weight', 0) or 0
 
-                # 检查该标的是否在持仓期间有过减仓操作
-                has_reduced = self._has_sell_trades(h['symbol'])
-                reduce_note = " (持仓期间有减仓操作)" if has_reduced else ""
-
                 line = (
                     f"- {h['symbol']} ({h['name']}): "
                     f"成本${h['cost']:.2f} → 现价${h['price']:.2f} (P&L {pnl_pct:+.1%}), "
                     f"权重{weight:.1%}, 趋势{trend} (MA5={ma5_str}/MA20={ma20_str}), "
                     f"波动{vol}, 情绪{sentiment_score}, Agent信号={signal}"
-                    f"{reduce_note}"
                 )
                 context_lines.append(line)
 
+            # ── 构建减仓订单详情 ──
+            sell_context_lines = []
+            for h in holdings:
+                sell_trades = self._get_sell_trades(h['symbol'])
+                if sell_trades:
+                    sell_lines = [f"  {t['date']} | {t['direction']} x{t['qty']} @ ${t['price']:.2f} | {t['signal'][:60]}" for t in sell_trades]
+                    sell_context_lines.append(f"{h['symbol']} 减仓记录:")
+                    sell_context_lines.extend(sell_lines)
+                    sell_context_lines.append("")  # 空行分隔
+
+            # 如果有减仓记录，添加到持仓信息中
+            if sell_context_lines:
+                full_context = (
+                    "## 持仓信息\n" +
+                    "\n".join(context_lines) +
+                    "\n\n## 减仓订单详情\n" +
+                    "\n".join(sell_context_lines)
+                )
+            else:
+                full_context = "## 持仓信息\n" + "\n".join(context_lines)
+
             prompt = f"""你是一个专业的美股持仓风险分析师。请分析以下持仓的风险和机会，给出每只标的的操作建议。
 
-## 持仓信息
-{chr(10).join(context_lines)}
+{full_context}
 
 ## 重要说明
 - 成本价使用券商的**摊薄成本法**：减仓卖出后，剩余持仓的成本会被摊薄（可能远低于现价）
-- 标注"持仓期间有减仓操作"的标的：曾部分卖出，但减仓不代表利润已锁定（可能止盈、止损或调仓）
-- 不假设减仓一定盈利或亏损，综合评估当前状态
+- "减仓订单详情"列出了该标的历史上的每次卖出操作，包括时间、数量、价格和触发原因
+- 结合减仓记录综合判断：是止盈、止损还是调仓
 
 ## 分析要求
 1. 综合评估 P&L、趋势、波动率、市场情绪、Agent 信号等因素
