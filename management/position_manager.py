@@ -52,6 +52,37 @@ class PositionManager:
             return row['cost_price']
         return 0.0
 
+    def _calculate_cost_from_trades(self, symbol: str) -> float:
+        """从本地交易记录计算持仓成本价（加权平均法）。
+        
+        比券商返回的成本价更可靠，因为券商可能使用不同的会计方法
+        或返回过时数据。
+        """
+        rows = self.db.conn.execute("""
+            SELECT direction, quantity, price FROM trades 
+            WHERE symbol = ? AND quantity > 0 AND price > 0
+            ORDER BY timestamp ASC
+        """, (symbol,)).fetchall()
+        
+        if not rows:
+            return 0.0
+        
+        total_cost = 0.0
+        total_qty = 0
+        
+        for direction, qty, price in rows:
+            if direction.lower() == 'buy':
+                total_cost += qty * price
+                total_qty += qty
+            elif direction.lower() == 'sell':
+                # 卖出时按比例减少总成本，但不改变剩余股份的单位成本
+                if total_qty > 0:
+                    sell_ratio = qty / total_qty
+                    total_cost *= (1 - sell_ratio)
+                    total_qty -= qty
+        
+        return total_cost / total_qty if total_qty > 0 else 0.0
+
     def sync_from_broker(self) -> int:
         """
         Sync current positions from Longbridge broker.
@@ -133,23 +164,24 @@ class PositionManager:
             #   negative  = short position → active (needs cover)
             active_flag = 1 if quantity != 0 else 0
 
-            # Fix: Preserve existing cost_price on sync — broker may return wrong basis
-            # Only update cost_price from broker if:
-            #   (a) This is a NEW position (no existing record), OR
-            #   (b) Existing cost_price is 0 (never recorded)
+            # Use our own trade history to calculate cost basis (more reliable than broker)
+            # Broker cost can be wrong (e.g., NVDA returned $5.56 instead of ~$200)
+            local_cost = self._calculate_cost_from_trades(symbol)
+            
+            # Only fall back to broker cost if we have no local trade data
+            effective_cost = local_cost if local_cost > 0 else cost_price
+
+            # Upsert: update quantity from broker, use our calculated cost
             self.db.conn.execute("""
                 INSERT INTO holdings (symbol, company_name, quantity, cost_price, available, last_synced)
                 VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(symbol) DO UPDATE SET
                     quantity=excluded.quantity,
-                    cost_price=CASE
-                        WHEN holdings.cost_price = 0 THEN excluded.cost_price
-                        ELSE holdings.cost_price
-                    END,
+                    cost_price=excluded.cost_price,
                     available=excluded.available,
                     last_synced=excluded.last_synced,
                     active=?
-            """, (symbol, name, quantity, cost_price, available, datetime.now(), active_flag))
+            """, (symbol, name, quantity, effective_cost, available, datetime.now(), active_flag))
 
             # Log if this is a short position (negative qty) that needs attention
             if quantity < 0:
@@ -163,12 +195,12 @@ class PositionManager:
                 )
 
             synced += 1
-            total_cost += quantity * cost_price
+            total_cost += quantity * effective_cost
 
             # Fetch current price for value calculation
             current_price = self._get_current_price(symbol)
-            market_value = quantity * current_price if current_price > 0 else quantity * cost_price
-            position_values[symbol] = (quantity, cost_price, name, current_price, market_value)
+            market_value = quantity * current_price if current_price > 0 else quantity * effective_cost
+            position_values[symbol] = (quantity, effective_cost, name, current_price, market_value)
 
         self.db.conn.commit()
 
