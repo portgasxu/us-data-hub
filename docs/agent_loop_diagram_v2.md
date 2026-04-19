@@ -388,6 +388,12 @@ if _check_kill_switch(db):
 # DB 版优势: 修改后立即生效，无需重启进程
 ```
 
+### 4.4 持仓止盈/止损策略
+
+> **止盈/止损完全由 LLM 动态评估，不设硬性阈值。**
+> LLM 综合考虑 P&L、趋势、波动率、市场情绪、集中度等因素，
+> 自主决定 HOLD / REDUCE / STOP_LOSS / TAKE_PROFIT。
+
 ### 4.3 数据完整性检查
 
 ```python
