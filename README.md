@@ -4,7 +4,7 @@
 
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10+-green.svg)](https://www.python.org/)
-[![Version](https://img.shields.io/badge/v3.1-审计优化版-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/v3.2-审计+止盈优化-orange.svg)](CHANGELOG.md)
 
 ---
 
@@ -28,6 +28,13 @@
 - **LLM 动态止盈/止损** — 止盈止损全权由 LLM 综合评估，不设硬性阈值
 - **Prompt 注入防护** — 外部内容清洗 + LLM 输出校验
 - **接口重试机制** — Longbridge 指数退避重试（3 次）
+
+### 📊 v3.2 持仓止盈策略优化
+
+- **成本价修正** — 使用券商摊薄成本法（减仓后成本摊薄，不自行计算）
+- **减仓判断** — 直接查交易记录 `_has_sell_trades()`，不再依赖 P&L 猜测
+- **减仓详情** — `_get_sell_trades()` 提供完整卖出订单详情给 LLM（时间/数量/价格/触发原因）
+- **中性标注** — 减仓仅作为事实标注，不假设"减仓=利润锁定"
 
 ---
 
@@ -89,10 +96,10 @@ us-data-hub/
 │   └── shadow_executor.py       # 影子执行（Dry Run）
 │
 ├── monitoring/            # 监控
-│   └── holding_monitor.py       # 持仓监控（LLM 动态止盈/止损评估）
+│   └── holding_monitor.py       # 持仓监控（LLM动态止盈+减仓订单详情参考）
 │
 ├── management/            # 管理
-│   └── position_manager.py      # 仓位管理
+│   └── position_manager.py      # 仓位管理（券商摊薄成本法）
 │
 ├── tradingagents/         # TradingAgents 多智能体框架
 │   ├── tradingagents/agents/    # 智能体（牛/熊/风控/组合）
@@ -234,10 +241,19 @@ CodingPlan 失败 → 百炼同模型 → qwen3.6-flash（末端兜底）
 | **幂等性** | signal_id 预检查 + DB 唯一约束，同一信号不重复执行 |
 | **Kill Switch DB** | `system_config` 表存储，修改后实时生效，无需重启 |
 | **启动对账** | 每次启动先 `sync_from_broker()` 同步券商持仓 |
-| **硬止损/止盈** | LLM 动态评估止盈/止损，不设硬性阈值 |
+| **止盈/止损** | LLM 动态评估，含减仓订单详情参考 |
 | **公司行动处理** | 拆股/分红自动识别与持仓成本调整 |
 | **Prompt 防护** | 外部内容注入检测 + LLM 输出格式/范围校验 |
 | **接口重试** | Longbridge 指数退避重试（3 次，最大 4s 退避） |
+
+### v3.2 止盈策略优化
+
+| 特性 | 说明 |
+|------|------|
+| **成本价** | 使用券商摊薄成本法，不自行计算 |
+| **减仓判断** | 查交易记录（最早交易日期起的 sell 记录），不依赖 P&L |
+| **减仓详情** | 完整卖出订单详情（时间/数量/价格/信号原因）交给 LLM |
+| **中性标注** | 减仓仅标注"持仓期间有减仓操作"，不做盈利/亏损假设 |
 
 ---
 
@@ -266,7 +282,7 @@ CodingPlan 失败 → 百炼同模型 → qwen3.6-flash（末端兜底）
 | 重复下单风险 | 高 | 消除（原子锁+幂等） |
 | LLM 成本 | 全部高配 | 分级分流，降低 ~50% |
 | Kill Switch | 需重启进程 | DB 实时生效 |
-| 硬止损/止盈 | 无 | LLM 动态评估 |
+| 止盈/止损 | 无 | LLM 动态评估，含减仓订单详情 |
 | 公司行动处理 | 无 | 拆股/分红自动调整 |
 | 接口重试 | 无 | 指数退避 3 次 |
 
