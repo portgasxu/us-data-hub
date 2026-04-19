@@ -46,14 +46,28 @@ class HoldingMonitor:
         return self._get_router()
 
     def _has_sell_trades(self, symbol: str) -> bool:
-        """检查该标的是否曾经卖出过（减仓锁定利润）。
+        """检查该标的在当前持仓周期内是否曾经卖出过（减仓锁定利润）。
         
-        这是判断"零成本持仓"的唯一依据——不依赖 P&L 百分比。
+        逻辑：从该标的的最早交易日期（建仓起始）开始查 sell 记录。
+        有些标的先有部分仓位被卖出（减仓），之后才重新买入加仓，
+        这些卖出都属于同一持仓周期，应该算作"减仓过"。
         """
         try:
-            row = self.db.conn.execute(
-                "SELECT COUNT(*) FROM trades WHERE symbol = ? AND direction = 'sell'",
+            # 找到该标的的最早交易日期（建仓起始）
+            first_trade = self.db.conn.execute(
+                "SELECT date(timestamp) FROM trades "
+                "WHERE symbol = ? ORDER BY timestamp ASC LIMIT 1",
                 (symbol,)
+            ).fetchone()
+            
+            if not first_trade:
+                return False
+            
+            # 从建仓起始日期开始，查是否有卖出记录
+            row = self.db.conn.execute(
+                "SELECT COUNT(*) FROM trades "
+                "WHERE symbol = ? AND direction = 'sell' AND date(timestamp) >= ?",
+                (symbol, first_trade[0])
             ).fetchone()
             return row and row[0] > 0
         except Exception:
