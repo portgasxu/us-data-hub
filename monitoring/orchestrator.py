@@ -538,27 +538,6 @@ class LLMBrain:
 
         raise Exception(f"All LLM methods failed: {'; '.join(errors)}")
 
-        # 方式2: 通过 DashScope（百炼）
-        try:
-            import dashscope
-            from dashscope import Generation
-            resp = Generation.call(
-                model=os.getenv("DASHSCOPE_MODEL", "qwen-plus"),
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_input},
-                ],
-                temperature=0.1,
-                max_tokens=2000,
-                timeout=30,
-            )
-            if resp.status_code == 200:
-                return resp.output.text
-        except Exception as e:
-            errors.append(f"dashscope: {e}")
-
-        raise Exception(f"All LLM methods failed: {errors}")
-
     def _rule_based_fallback(self, status_report: Dict) -> str:
         """LLM 不可用时的规则引擎降级"""
         decisions = []
@@ -761,6 +740,9 @@ class ModuleExecutor:
                     cwd=PROJECT_ROOT,
                 )
 
+            # 保存 Popen 对象引用，用于后续检查 exit code
+            self._processes[module_id] = process
+
             if isinstance(state, dict):
                 state["pid"] = process.pid
             else:
@@ -933,18 +915,42 @@ class OrchestratorBrain:
                 pid = state.pid
             if status == ModuleStatus.RUNNING.value and pid:
                 if not self.executor._is_process_alive(pid):
-                    logger.warning(f"💀 {config.name} (PID {pid}) 已退出")
-                    if isinstance(state, dict):
-                        state["status"] = ModuleStatus.FAILED.value
-                        state["consecutive_failures"] = state.get("consecutive_failures", 0) + 1
-                        state["total_failures"] = state.get("total_failures", 0) + 1
-                        state["pid"] = None
+                    # 检查 exit code：区分正常完成 vs 异常退出
+                    popen = self.executor._processes.get(module_id)
+                    exit_code = None
+                    if popen is not None:
+                        try:
+                            exit_code = popen.wait(timeout=0.1)
+                        except Exception:
+                            exit_code = popen.returncode
+
+                    is_normal_exit = (exit_code is not None and exit_code == 0)
+
+                    if is_normal_exit and config.run_mode == "scheduled":
+                        # scheduled 一次性任务正常完成 → 标记 COMPLETED，不增加失败计数
+                        logger.info(f"✅ {config.name} (PID {pid}) 正常完成 (exit {exit_code})")
+                        if isinstance(state, dict):
+                            state["status"] = ModuleStatus.COMPLETED.value
+                            state["consecutive_failures"] = 0
+                            state["pid"] = None
+                        else:
+                            state.status = ModuleStatus.COMPLETED.value
+                            state.consecutive_failures = 0
+                            state.pid = None
                     else:
-                        state.status = ModuleStatus.FAILED.value
-                        state.consecutive_failures += 1
-                        state.total_failures += 1
-                        state.pid = None
-                    self.memory.add_alert("warning", module_id, "进程意外退出")
+                        # 异常退出或 daemon 意外退出 → FAILED
+                        logger.warning(f"💀 {config.name} (PID {pid}) 异常退出 (exit {exit_code})")
+                        if isinstance(state, dict):
+                            state["status"] = ModuleStatus.FAILED.value
+                            state["consecutive_failures"] = state.get("consecutive_failures", 0) + 1
+                            state["total_failures"] = state.get("total_failures", 0) + 1
+                            state["pid"] = None
+                        else:
+                            state.status = ModuleStatus.FAILED.value
+                            state.consecutive_failures += 1
+                            state.total_failures += 1
+                            state.pid = None
+                        self.memory.add_alert("warning", module_id, f"进程异常退出 (exit {exit_code})")
 
         self._tick_count += 1
 
@@ -1090,7 +1096,7 @@ class OrchestratorBrain:
 
         # 4. 最近决策历史
         lines.append(f"=== 最近决策 ===")
-        for d in self.memory.state.recent_decisions[-10:]:
+        for d in self.memory.state.llm_decisions[-10:]:
             lines.append(json.dumps(d, ensure_ascii=False))
 
         # 5. 数据库状态检查

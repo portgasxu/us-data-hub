@@ -36,7 +36,7 @@ def build_instrument_context(ticker: str) -> str:
 
 def create_msg_delete():
     def delete_messages(state):
-        """Clear messages and add placeholder for Anthropic compatibility"""
+        """Clear messages and add placeholder for compatibility"""
         return {
             "messages": [
                 HumanMessage(content="Summarize your analysis so far."),

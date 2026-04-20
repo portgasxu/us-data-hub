@@ -154,11 +154,6 @@ class TradingAgentsGraph:
             if reasoning_effort:
                 kwargs["reasoning_effort"] = reasoning_effort
 
-        elif provider == "anthropic":
-            effort = self.config.get("anthropic_effort")
-            if effort:
-                kwargs["effort"] = effort
-
         # Pass API key if configured (supports OpenAI-compatible providers like DashScope)
         api_key = self.config.get("api_key")
         if api_key:

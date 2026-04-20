@@ -2,11 +2,11 @@
 
 > 基于多智能体分析 + 动态阈值 + 统一风控的美股自动化交易框架
 > 
-> 🧠 **v3.5: P1 代码质量加固 + 滚动回撤 + 实时告警 + 小盘股限价单**
+> 🧠 **v3.6: 清理 Claude/Anthropic 依赖 + Orchestrator 进程退出误判修复**
 
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10+-green.svg)](https://www.python.org/)
-[![Version](https://img.shields.io/badge/v3.5-P1加固-purple.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/v3.6-清理自愈修复-purple.svg)](CHANGELOG.md)
 
 ---
 
@@ -26,6 +26,12 @@
 - **L3 代码自愈** — Orchestrator 新增 `auto_fix` action：收集日志上下文 → 调用 CodingPlan LLM 根因分析 → 自动生成修复代码 → 写入文件 → Git commit → 重启验证 → 生成报告
 - **自愈安全边界** — 同一模块最多 2 次尝试，不修改数据库/密钥/配置，每次修复前自动 commit 可回滚
 - **规则引擎集成** — LLM 不可用时 fallback 也会自动尝试 auto_fix
+
+### 🔧 v3.6 清理 Claude 依赖 + Orchestrator 误判修复（2026-04-20）
+
+- **Claude/Anthropic 全面清理** — 删除 `CLAUDE_*` 环境变量、`anthropic_client.py`、factory 路由、CLI `anthropic_effort`、default_config 残留
+- **Orchestrator 进程退出误判修复** — scheduled 一次性任务正常退出（exit 0）不再被标记为 FAILED，改为 COMPLETED 并重置失败计数
+- **保存 Popen 对象** — 启动模块时保存进程引用，退出时检查 exit code 区分正常完成 vs 异常崩溃
 
 - **重复定义清理** — `auto_execute.py` 中 `_try_acquire_order_lock` 4→1、`RISK_RULES` 2→1、`_check_kill_switch` 2→1，删除 336 行冗余代码
 - **LLM 输出解析加固** — 三步降级（markdown 代码块 → 正则 → 纯 JSON）+ schema 校验，解决 markdown 方括号误匹配
