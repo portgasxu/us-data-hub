@@ -1,7 +1,7 @@
-# 美股自动交易系统 — Agent Loop 架构图 v3.4
+# 美股自动交易系统 — Agent Loop 架构图 v3.5
 
-> 更新时间: 2026-04-20 15:00
-> 更新内容: v3.4 Crontab 退场 + Orchestrator 统一调度 + 守护进程修复
+> 更新时间: 2026-04-20 16:57
+> 更新内容: v3.5 P1 代码质量加固 + 滚动回撤 + 实时告警 + 小盘股限价单 + 20 个单元测试
 > 覆盖: JVS大脑 / 订单监控 / 价格采集 / 系统管理器 / 持仓去重 / Pending去重 / Screener-to-Trade 全链路 / 独立复盘晨报
 
 ---
@@ -75,7 +75,16 @@
 | 因子计算入口 | `scripts/calculate_factors.py` | 🟢 新增 | 修复缺失的因子计算脚本 |
 | TradeSignal 数据结构 | `analysis/signal_schema.py` | 🟢 新增 | 统一信号数据结构 |
 
-### 1.2 v3.4 修复
+### 1.2 🆕 v3.5 P1 加固
+
+| 模块 | 路径 | 状态 | 新增内容 |
+|------|------|------|----------|
+| 告警通道 | `alerts/notifier.py` | 🆕 | Telegram + Webhook 双通道推送 |
+| 限价单 | `executors/auto_trade.py` | 🆕 | 自动 LO/MO 切换 + 大盘股白名单 |
+| 滚动回撤 | `analysis/circuit_breaker.py` | 🆕 | 5日/20日/总回撤三维检查 |
+| 测试 | `tests/test_risk_controls.py` | 🆕 | 20 个单元测试 |
+
+### 1.3 v3.4 修复
 
 | 模块 | 文件 | 状态 | 说明 |
 |------|------|------|-----------|
@@ -84,12 +93,12 @@
 | Crontab 退场 | — | ⚪ 已废弃 | 所有调度统一归 JVS 大脑管理 |
 | Longbridge 订单命令 | `executors/longbridge.py` | 🟢 修复 | `orders` → `order --format json` |
 
-### 1.3 v3.1 审计优化
+### 1.4 v3.1 审计优化
 
 | 模块 | 文件 | 状态 | 改动 |
 |------|------|------|-----------|
 | 自动交易 | `scripts/auto_execute.py` | 🟢 审计优化 | 竞态修复+Kill Switch DB+启动对账+幂等性+Pending去重 |
-| 持仓监控 | `monitoring/holding_monitor.py` | 🟢 v3.2 优化 | LLM动态止盈+减仓订单详情 |
+| 持仓监控 | `monitoring/holding_monitor.py` | 🟢 v3.5 加固 | LLM动态止盈+三步JSON解析+schema校验 |
 | 成本计算 | `management/position_manager.py` | 🟢 审计优化 | 券商摊薄成本法 |
 | 公司行动 | `analysis/corporate_actions.py` | 🟢 新增 | 拆股/分红处理 |
 | Prompt 防护 | `analysis/prompt_guard.py` | 🟢 新增 | 注入检测+LLM输出校验 |
@@ -602,6 +611,17 @@ validate_strategy.py → feedback_loop.py → screener_config.json → screener 
 | 17 | Review/Morning-Brief 错误执行交易 | 独立逻辑，不执行交易 | ✅ |
 | 18 | 选股未去重持仓 | 持仓去重 + 顺延逻辑 | ✅ |
 | 19 | 一键启动缺失 | System Manager 一键启动所有 | ✅ |
+| 20 | 代码重复定义/解析脆弱/无回撤/无告警 | v3.5 P1 代码质量加固 | ✅ |
+
+### v3.5 P1 代码质量加固
+
+- **重复定义清理** — `auto_execute.py` 中 `_try_acquire_order_lock` 4→1、`_check_kill_switch` 2→1、`RISK_RULES` 2→1
+- **LLM 输出解析** — 三步降级（markdown → 正则 → 纯 JSON）+ schema 校验
+- **滚动回撤** — 新增 5日/$1500、20日/$3000、总回撤 10% 三维检查
+- **告警通道** — `alerts/notifier.py` 支持 Telegram + Webhook
+- **小盘股限价单** — 大盘股列表自动 MO，其余自动 LO
+- **SQLite busy_timeout** — 30s 超时等待
+- **单元测试** — 20 个测试覆盖 CircuitBreaker、订单锁、解析、告警
 
 ### v3.4 Crontab 退场 + 统一调度
 

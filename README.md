@@ -2,11 +2,11 @@
 
 > 基于多智能体分析 + 动态阈值 + 统一风控的美股自动化交易框架
 > 
-> 🧠 **v3.4: Crontab 退场 + Orchestrator 统一调度 + 守护进程修复**
+> 🧠 **v3.5: P1 代码质量加固 + 滚动回撤 + 实时告警 + 小盘股限价单**
 
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10+-green.svg)](https://www.python.org/)
-[![Version](https://img.shields.io/badge/v3.4-Orchestrator统一调度-purple.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/v3.5-P1加固-purple.svg)](CHANGELOG.md)
 
 ---
 
@@ -20,6 +20,19 @@
 - **并行数据采集** — 7 只股票 × 5 数据源并行采集，耗时从 17min 降至 3-5min
 - **策略反馈闭环** — 胜率/Sharpe/回撤自动反馈 → 动态调整选股权重
 - **全链路可追溯** — Trace ID + Event Bus + 结构化日志
+
+### 🧠 v3.5 P1 代码质量加固（2026-04-20）
+
+- **重复定义清理** — `auto_execute.py` 中 `_try_acquire_order_lock` 4→1、`RISK_RULES` 2→1、`_check_kill_switch` 2→1，删除 336 行冗余代码
+- **LLM 输出解析加固** — 三步降级（markdown 代码块 → 正则 → 纯 JSON）+ schema 校验，解决 markdown 方括号误匹配
+- **否定词排除** — `parse_decision()` 拦截 "don't buy"、"avoid buying" 等误判
+- **滚动回撤管控** — 新增 5 日/$1500、20 日/$3000、总回撤 10% 三维检查
+- **连亏基准修复** — CircuitBreaker 改用卖出前 5 日均价作成本，不再被稀释后的 `cost_price` 误导
+- **实时告警通道** — 新建 `alerts/notifier.py`，支持 Telegram + Webhook，P0/P1 事件实时推送
+- **小盘股限价单** — 自动切换 LO/MO：小盘股限价单 + 0.1% 缓冲，大盘股保留市价单
+- **SQLite busy_timeout** — 30 秒超时等待，防止多进程 `database is locked`
+- **调度统一归口** — 清理 `system_manager.py` 残留 crontab 代码，Orchestrator 唯一调度权威
+- **20 个单元测试** — 覆盖 CircuitBreaker、订单锁、LLM 解析、否定词、告警模块
 
 ### 🧠 v3.4 Crontab 退场 + Orchestrator 统一调度（2026-04-20）
 
