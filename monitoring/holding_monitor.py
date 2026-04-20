@@ -271,13 +271,47 @@ class HoldingMonitor:
                 return alerts
             content = result["content"].strip()
 
-            # 提取 JSON
-            json_match = re.search(r'\[.*\]', content, re.DOTALL)
-            if not json_match:
-                logger.warning(f"LLM 返回格式异常: {content[:200]}")
+            # 提取 JSON — 优先清理 markdown 代码块，再 fallback 到正则
+            recommendations = None
+            # 1) 尝试提取 ```json ... ``` 代码块
+            md_match = re.search(r'```(?:json)?\s*\n?([\s\S]*?)\n?\s*```', content)
+            if md_match:
+                try:
+                    recommendations = json.loads(md_match.group(1).strip())
+                except json.JSONDecodeError:
+                    pass
+            # 2) 尝试提取最外层 JSON 数组
+            if recommendations is None:
+                json_match = re.search(r'\[\s*\{.*\}\s*\]', content, re.DOTALL)
+                if json_match:
+                    try:
+                        recommendations = json.loads(json_match.group())
+                    except json.JSONDecodeError:
+                        pass
+            # 3) 整体尝试解析（LLM 可能直接返回纯 JSON）
+            if recommendations is None:
+                try:
+                    recommendations = json.loads(content)
+                except json.JSONDecodeError:
+                    pass
+
+            if recommendations is None:
+                logger.warning(f"LLM 返回格式异常，无法解析: {content[:200]}")
                 return alerts
 
-            recommendations = json.loads(json_match.group())
+            # Schema 校验：每个元素必须有 symbol + action
+            validated = []
+            for rec in recommendations:
+                if not isinstance(rec, dict):
+                    continue
+                if 'symbol' not in rec or 'action' not in rec:
+                    logger.warning(f"LLM 返回缺少 symbol/action 字段: {rec}")
+                    continue
+                if rec['action'] not in ('HOLD', 'REDUCE', 'ADD', 'STOP_LOSS', 'TAKE_PROFIT'):
+                    logger.warning(f"LLM 返回非法 action: {rec['action']} for {rec.get('symbol')}")
+                    continue
+                validated.append(rec)
+            recommendations = validated
 
             for rec in recommendations:
                 symbol = rec.get('symbol', '')

@@ -52,67 +52,58 @@ DAEMON_SERVICES = {
     },
 }
 
-# 定时任务（由 crontab 调度）
+# 定时任务（由 Orchestrator 大脑调度，crontab 已退场）
 CRON_TASKS = {
     "price-collector": {
         "name": "价格采集",
-        "crontab_pattern": "*/30 15-21 && */5 21-03",
         "description": "每30分钟(盘前)/每5分钟(盘中)采集价格",
         "test_command": "python3 -m collectors.longbridge --data-type price",
         "critical": True,
     },
     "full-loop": {
         "name": "全循环交易",
-        "crontab_pattern": "*/30 21-03",
         "description": "每30分钟从SignalHub取信号执行交易",
         "test_command": "python3 scripts/auto_execute.py --mode full-loop --show-session",
         "critical": True,
     },
     "holding-monitor": {
         "name": "持仓监控",
-        "crontab_pattern": "0 22,0,2",
         "description": "监控持仓，LLM动态止盈止损",
         "test_command": "python3 scripts/auto_execute.py --mode holding-monitor",
         "critical": True,
     },
     "screener-to-trade": {
         "name": "选股→交易",
-        "crontab_pattern": "0 16,18,20",
         "description": "三层选股→TradingAgents→SignalHub→执行",
         "test_command": "python3 scripts/run.py screener",
         "critical": True,
     },
     "order-monitor": {
         "name": "订单监控",
-        "crontab_pattern": "0 21 && */30 22-04",
         "description": "监控pending订单，处理超时/跳空/部分成交",
         "test_command": "python3 scripts/auto_execute.py --mode order-monitor",
         "critical": True,
     },
     "review": {
         "name": "盘后复盘",
-        "crontab_pattern": "0 5",
         "description": "盘后统计今日交易和持仓盈亏",
         "test_command": "python3 scripts/auto_execute.py --mode review",
         "critical": False,
     },
     "morning-brief": {
         "name": "盘前晨报",
-        "crontab_pattern": "0 6",
         "description": "盘前简报：持仓概览+最新选股",
         "test_command": "python3 scripts/auto_execute.py --mode morning-brief",
         "critical": False,
     },
     "factors": {
         "name": "因子计算",
-        "crontab_pattern": "0 4",
         "description": "每日凌晨计算技术指标因子",
         "test_command": "python3 scripts/calculate_factors.py",
         "critical": False,
     },
     "order-cleanup": {
         "name": "订单清理",
-        "crontab_pattern": "0 4",
         "description": "盘后清理所有未成交市价单",
         "test_command": "python3 -m monitoring.order_monitor --mode cleanup",
         "critical": False,
@@ -214,37 +205,6 @@ def stop_daemon(service_id: str, service: Dict) -> bool:
             os.remove(pid_file)
 
 
-def check_crontab() -> List[str]:
-    """检查 crontab 配置是否完整"""
-    issues = []
-    try:
-        result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
-        if result.returncode != 0:
-            issues.append("❌ Crontab 未配置")
-            return issues
-
-        crontab_content = result.stdout
-
-        # 检查关键任务是否存在
-        critical_patterns = {
-            "price-collector": "collectors.longbridge",
-            "watcher": "scripts/watcher.py",
-            "full-loop": "auto_execute.py --mode full-loop",
-            "holding-monitor": "holding-monitor",
-            "screener-to-trade": "screener-to-trade",
-            "order-monitor": "order-monitor",
-        }
-
-        for task_id, pattern in critical_patterns.items():
-            if pattern not in crontab_content:
-                task_name = CRON_TASKS.get(task_id, {}).get("name", task_id)
-                issues.append(f"❌ {task_name} 未在 crontab 中找到 ({pattern})")
-
-    except Exception as e:
-        issues.append(f"❌ 检查 crontab 失败: {e}")
-    return issues
-
-
 def test_module(task_id: str, task: Dict) -> tuple:
     """测试单个模块是否能正常运行（dry-run 模式）"""
     # 持仓监控需要连接 broker，给更多时间
@@ -265,36 +225,6 @@ def test_module(task_id: str, task: Dict) -> tuple:
         return "timeout", f"执行超时 (>{timeout}s)"
     except Exception as e:
         return "error", str(e)[:200]
-
-
-def get_crontab_schedule(task_id: str) -> str:
-    """从 crontab 中获取任务的调度时间"""
-    task = CRON_TASKS.get(task_id, {})
-    patterns = {
-        "price-collector": "collectors.longbridge",
-        "full-loop": "--mode full-loop",
-        "holding-monitor": "--mode holding-monitor",
-        "screener-to-trade": "--mode screener-to-trade",
-        "order-monitor": "--mode order-monitor",
-        "review": "--mode review",
-        "morning-brief": "--mode morning-brief",
-        "factors": "calculate_factors",
-        "order-cleanup": "order_monitor.*cleanup",
-        "watcher": "scripts/watcher.py",
-    }
-    pattern = patterns.get(task_id, "")
-    try:
-        result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
-        if result.returncode == 0:
-            for line in result.stdout.split("\n"):
-                if pattern in line and not line.strip().startswith("#"):
-                    parts = line.split()
-                    if len(parts) >= 5:
-                        cron_expr = " ".join(parts[:5])
-                        return cron_expr
-    except Exception:
-        pass
-    return "未知"
 
 
 def cmd_start():
@@ -319,22 +249,16 @@ def cmd_start():
         print(f"  ❌ 数据库异常: {e}")
         return
 
-    # === 步骤2: 检查 Crontab ===
-    print(f"\n📅 步骤 2/4: Crontab 调度表")
+    # === 步骤2: 确认 Orchestrator 调度 ===
+    print(f"\n📅 步骤 2/3: 任务调度 (Orchestrator 管理)")
     print(f"{'─'*40}")
-    cron_issues = check_crontab()
-    if cron_issues:
-        for issue in cron_issues:
-            print(f"  {issue}")
-    else:
-        print(f"  ✅ 所有定时任务已配置")
-        for task_id, task in CRON_TASKS.items():
-            schedule = get_crontab_schedule(task_id)
-            emoji = "🔴" if task["critical"] else "⚪"
-            print(f"    {emoji} {task['name']:<12} → {schedule}")
+    print(f"  ✅ 所有定时任务由 Orchestrator 大脑调度")
+    for task_id, task in CRON_TASKS.items():
+        emoji = "🔴" if task["critical"] else "⚪"
+        print(f"    {emoji} {task['name']}")
 
     # === 步骤3: 启动常驻服务 ===
-    print(f"\n🔧 步骤 3/4: 启动常驻服务")
+    print(f"\n🔧 步骤 3/3: 启动常驻服务")
     print(f"{'─'*40}")
     daemon_ok = 0
     daemon_fail = 0
@@ -348,7 +272,7 @@ def cmd_start():
         print(f"  ℹ️  无常驻服务需要启动")
 
     # === 步骤4: 模块健康检查 ===
-    print(f"\n🔍 步骤 4/4: 模块健康检查")
+    print(f"\n🔍 模块健康检查")
     print(f"{'─'*40}")
     pass_count = 0
     fail_count = 0
@@ -368,7 +292,6 @@ def cmd_start():
     print(f"{'='*60}")
     print(f"  常驻服务: {daemon_ok} 启动 | {daemon_fail} 失败")
     print(f"  定时任务: {pass_count} 正常 | {fail_count} 异常")
-    print(f"  Crontab:  {'✅ 完整' if not cron_issues else '❌ 有缺失'}")
     print(f"{'='*60}")
 
     if daemon_fail > 0:
@@ -386,8 +309,7 @@ def cmd_stop():
     print(f"🛑 US Data Hub 停止常驻服务")
     print(f"   时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*60}")
-    print(f"\n⚠️  注意: 定时任务由 crontab 管理，不会停止")
-    print(f"  如需停止所有，请执行: crontab -r")
+    print(f"\n⚠️  注意: Orchestrator 大脑需单独停止 (kill orchestrator 进程)")
     print()
 
     for service_id, service in DAEMON_SERVICES.items():
@@ -413,13 +335,12 @@ def cmd_status():
         print(f"  {emoji} {service['name']} {pid_str}")
 
     # 定时任务状态
-    print(f"\n【定时任务 (Crontab)】")
-    print(f"{'任务':<14} {'调度时间':<20} {'状态'}")
-    print(f"{'─'*14} {'─'*20} {'─'*6}")
+    print(f"\n【定时任务 (Orchestrator 管理)】")
+    print(f"{'任务':<14} {'状态'}")
+    print(f"{'─'*14} {'─'*6}")
     for task_id, task in CRON_TASKS.items():
-        schedule = get_crontab_schedule(task_id)
         emoji = "🔴" if task["critical"] else "⚪"
-        print(f"  {emoji} {task['name']:<12} {schedule:<20} crontab 调度")
+        print(f"  {emoji} {task['name']:<12} Orchestrator 调度")
 
     # 数据状态
     try:
@@ -459,14 +380,8 @@ def cmd_check():
         print(f"\n  ❌ 数据库异常: {e}")
         issues.append("database")
 
-    # Crontab
-    cron_issues = check_crontab()
-    if cron_issues:
-        for issue in cron_issues:
-            print(f"  {issue}")
-        issues.append("crontab")
-    else:
-        print(f"  ✅ Crontab 完整")
+    # Orchestrator 调度
+    print(f"  ✅ 任务由 Orchestrator 大脑调度")
 
     # 常驻服务
     for service_id, service in DAEMON_SERVICES.items():

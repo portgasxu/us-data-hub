@@ -66,11 +66,18 @@ def parse_decision(signal: str) -> Dict:
     except (json.JSONDecodeError, ValueError):
         pass
 
-    # Fallback: text parsing
+    # Fallback: text parsing with negation guard
     signal_lower = signal.lower()
-    if "buy" in signal_lower or "overweight" in signal_lower:
+
+    # Negation patterns: "don't buy", "no buy", "not buy", "avoid buying", etc.
+    negation_patterns = [
+        r"(?:don'?t|do\s+not|no|not|never|avoid|shouldn'?t|won'?t|will\s+not)\s+(?:buy|long)",
+    ]
+    has_negation = any(re.search(p, signal_lower) for p in negation_patterns)
+
+    if not has_negation and ("buy" in signal_lower or "overweight" in signal_lower or "long" in signal_lower):
         decision["action"] = "buy"
-    elif "sell" in signal_lower or "underweight" in signal_lower:
+    elif "sell" in signal_lower or "underweight" in signal_lower or "short" in signal_lower:
         decision["action"] = "sell"
     elif "stop_loss" in signal_lower or "stop loss" in signal_lower:
         decision["action"] = "sell"
@@ -82,6 +89,83 @@ def parse_decision(signal: str) -> Dict:
         decision["action"] = "hold"
 
     return decision
+
+
+# ── P1: 小盘股限价单支持 ──
+LARGE_CAP_SYMBOLS = {
+    # 市值 > $100B 或日均量 > 500 万的大盘股（保留市价单）
+    "AAPL", "MSFT", "NVDA", "GOOGL", "GOOG", "AMZN", "META", "TSLA",
+    "BRK.B", "BRK-A", "JPM", "V", "JNJ", "WMT", "XOM", "MA", "PG",
+    "UNH", "HD", "DIS", "BAC", "ADBE", "CRM", "NFLX", "CMCSA", "INTC",
+    "VZ", "PFE", "KO", "PEP", "TMO", "ABBV", "COST", "AVGO", "MRK",
+    "ACN", "NKE", "TXN", "LLY", "MDT", "UNP", "NEE", "DHR", "LIN", "AMGN",
+}
+
+
+def _should_use_limit_order(symbol: str, quote: dict) -> bool:
+    """判断是否应使用限价单（小盘股/低流动性）。
+
+    规则：
+    - 不在大盘股列表中的 → 限价单
+    - 有 quote 且 volume < 2M → 限价单
+    """
+    sym = symbol.upper().replace(".US", "")
+    if sym in LARGE_CAP_SYMBOLS:
+        return False
+    # 如果有 quote 数据，进一步检查成交量
+    if quote:
+        volume = quote.get("volume", 0)
+        if volume and volume > 2_000_000:
+            return False  # 成交量够大，市价单安全
+    return True
+
+
+def _execute_limit_order(action: str, symbol: str, quantity: int,
+                         ref_price: float, result: dict, decision: dict) -> dict:
+    """通过 Longbridge CLI 提交限价单（限价 = 参考价 ± 0.1% 缓冲）。"""
+    if ref_price <= 0:
+        # 无参考价，fallback 市价单
+        logger.warning(f"[TRADE] {symbol}: 无参考价，fallback 市价单")
+        result["status"] = "error"
+        result["message"] = "No reference price for limit order"
+        return result
+
+    # 买入略高、卖出略低
+    if action == "buy":
+        limit_price = round(ref_price * 1.001, 2)
+    else:
+        limit_price = round(ref_price * 0.999, 2)
+
+    symbol_us = f"{symbol.upper()}.US"
+    try:
+        cmd = [
+            "longbridge", "order", action, symbol_us, str(quantity),
+            "--order-type", "LO", "--limit-price", str(limit_price), "-y"
+        ]
+        logger.info(f"[TRADE] Executing limit order: {' '.join(cmd)}")
+        exec_result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+        if exec_result.returncode == 0:
+            result["status"] = "executed"
+            result["message"] = f"Limit order placed: {action} {quantity} {symbol_us} @ ${limit_price:.2f}"
+            result["order_response"] = exec_result.stdout.strip()
+            result["order_type"] = "LO"
+            result["limit_price"] = limit_price
+            log_trade(
+                symbol=symbol, action=action.upper(), price=ref_price,
+                quantity=quantity, signal=decision.get("reason", ""),
+                note=f"LIMIT_ORDER @ ${limit_price:.2f}"
+            )
+        else:
+            result["status"] = "error"
+            result["message"] = f"Limit order failed: {exec_result.stderr.strip()[:300]}"
+            logger.error(f"[TRADE] ❌ {result['message']}")
+    except Exception as e:
+        result["status"] = "error"
+        result["message"] = f"Limit order execution failed: {str(e)}"
+        logger.error(f"[TRADE] ❌ {result['message']}")
+
+    return result
 
 
 def execute_trade(decision: Dict, outside_rth: str = "ANY_TIME") -> Dict:
@@ -149,6 +233,15 @@ def execute_trade(decision: Dict, outside_rth: str = "ANY_TIME") -> Dict:
         estimated_price = quote.get("last", 0)
         logger.info(f"[TRADE] {symbol} quote: ${quote.get('last', 'N/A')}")
 
+    # ── P1: 流动性判断 — 小盘股使用限价单，大盘股保留市价单 ──
+    use_limit = _should_use_limit_order(symbol, quote)
+
+    if use_limit:
+        # 走 SmartExecutor 限价单路径
+        logger.info(f"[TRADE] {symbol}: 低流动性 → 限价单模式")
+        return _execute_limit_order(action, symbol, quantity, estimated_price, result, decision)
+
+    # 大盘股：市价单（保持原有逻辑）
     # Execute order via Longbridge CLI
     try:
         symbol_us = f"{symbol.upper()}.US"

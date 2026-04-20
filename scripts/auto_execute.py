@@ -40,19 +40,13 @@ from executors.longbridge import LongbridgeExecutor
 from executors.auto_trade import execute_trade
 from analysis.circuit_breaker import check_circuit_breaker, get_vix_adjustment, get_vix_regime
 from analysis.session_strategy import get_market_session, should_execute_trade, print_session_status
+from alerts.notifier import alert, AlertLevel
 from dayup_logger import setup_root_logger, log_risk
 
 setup_root_logger(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Risk rules — module level (needed by _execute_trades)
-RISK_RULES = {
-    "max_daily_loss_pct": 0.05,
-    "max_concurrent_positions": 10,
-    "max_single_position_pct": 0.20,
-    "max_daily_trades": 20,
-}
-
 # ═══════════════════════════════════════════════════════
 # v6.0: Helper functions for Signal/TradeSignal compatibility
 # ═══════════════════════════════════════════════════════
@@ -210,57 +204,6 @@ def _lock_order(db: Database, symbol: str, direction: str, minutes: int = 10):
         logger.error(f"Failed to lock order: {e}")
 
 
-def _try_acquire_order_lock(db: Database, symbol: str, direction: str, signal_id: str, minutes: int = 10) -> bool:
-    """P0 审计修复: 原子化竞态条件修复 + 幂等性保证
-
-    合并"检查+锁定"为一步操作，利用 SQLite 的 INSERT OR IGNORE 防止并发进程之间的竞态条件。
-    同时检查 signal_id 是否已在 trades 表中，实现幂等性。
-
-    Returns:
-        True: 成功获取锁，可以继续下单
-        False: 信号已被处理过，应跳过
-    """
-    try:
-        # 1. 幂等性检查: signal_id 是否已在 trades 表中（已执行过）
-        existing = db.conn.execute(
-            "SELECT COUNT(*) FROM trades WHERE signal_id = ? AND status IN ('submitted', 'filled', 'partial')",
-            (signal_id,)
-        ).fetchone()
-        if existing and existing[0] > 0:
-            logger.info(f"[{symbol}] ⏭️ Signal {signal_id} already executed, skipping")
-            return False
-
-        # 2. 原子化锁定: INSERT OR IGNORE 利用 UNIQUE 约束防止重复
-        lock_key = f'order_lock:{signal_id}'
-        db.conn.execute(
-            """INSERT OR IGNORE INTO signal_cooldowns
-               (symbol, direction, source, cooldown_until, reason)
-               VALUES (?, ?, 'order_lock', datetime('now', ?), ?)""",
-            (symbol, direction, f'+{minutes} minutes', lock_key)
-        )
-        db.conn.commit()
-
-        # 3. 验证锁定是否成功（如果已有其他进程锁定，INSERT OR IGNORE 不会插入新记录）
-        row = db.conn.execute(
-            "SELECT reason FROM signal_cooldowns "
-            "WHERE symbol = ? AND direction = ? AND source = 'order_lock' "
-            "AND cooldown_until > datetime('now') "
-            "ORDER BY created_at DESC LIMIT 1",
-            (symbol, direction)
-        ).fetchone()
-
-        if row and row[0] == lock_key:
-            logger.info(f"[{symbol}] 🔒 Order lock acquired (signal_id={signal_id})")
-            return True
-        else:
-            logger.info(f"[{symbol}] ⏭️ Already locked by another process, skipping (signal_id={signal_id})")
-            return False
-
-    except Exception as e:
-        logger.error(f"[{symbol}] Failed to acquire order lock: {e}")
-        return False  # 保守策略: 锁定失败时跳过
-
-
 def _check_kill_switch(db: Database) -> bool:
     """P0 审计修复: Kill Switch DB 版 — 无需重启进程即可生效
 
@@ -287,138 +230,6 @@ def _check_kill_switch(db: Database) -> bool:
         logger.debug(f"Kill switch DB check failed: {e}")
 
     return False
-
-
-def _try_acquire_order_lock(db: Database, symbol: str, direction: str, signal_id: str, minutes: int = 10) -> bool:
-    """P0 审计修复: 原子化竞态条件修复 + 幂等性保证
-    
-    合并"检查+锁定"为一步操作，利用 SQLite 的 INSERT OR IGNORE 防止并发进程之间的竞态条件。
-    同时检查 signal_id 是否已在 trades 表中，实现幂等性（同一信号不会重复执行）。
-    
-    Returns:
-        True: 成功获取锁，可以继续下单
-        False: 信号已执行或被其他进程锁定，应跳过
-    """
-    try:
-        # 1. 幂等性检查：signal_id 是否已在 trades 表中（已执行过）
-        existing = db.conn.execute(
-            "SELECT COUNT(*) FROM trades WHERE signal_id = ? AND status IN ('submitted', 'filled', 'partial')",
-            (signal_id,)
-        ).fetchone()
-        if existing and existing[0] > 0:
-            logger.info(f"[{symbol}] ⏭️ Signal {signal_id} already executed, skipping")
-            return False
-
-        # 2. 原子化锁定：INSERT OR IGNORE 利用 UNIQUE 约束防止重复
-        lock_key = f'order_lock:{signal_id}'
-        db.conn.execute(
-            """INSERT OR IGNORE INTO signal_cooldowns 
-               (symbol, direction, source, cooldown_until, reason) 
-               VALUES (?, ?, 'order_lock', datetime('now', ?), ?)""",
-            (symbol, direction, f'+{minutes} minutes', lock_key)
-        )
-        db.conn.commit()
-
-        # 3. 验证锁定是否成功（如果已有其他进程锁定，INSERT OR IGNORE 不会插入新记录）
-        row = db.conn.execute(
-            "SELECT reason FROM signal_cooldowns "
-            "WHERE symbol = ? AND direction = ? AND source = 'order_lock' "
-            "AND cooldown_until > datetime('now') "
-            "ORDER BY created_at DESC LIMIT 1",
-            (symbol, direction)
-        ).fetchone()
-
-        if row and row[0] == lock_key:
-            logger.info(f"[{symbol}] 🔒 Order lock acquired (signal_id={signal_id})")
-            return True
-        else:
-            logger.info(f"[{symbol}] ⏭️ Already locked by another process, skipping (signal_id={signal_id})")
-            return False
-
-    except Exception as e:
-        logger.error(f"[{symbol}] Failed to acquire order lock: {e}")
-        return False  # 保守策略：锁定失败时跳过
-
-
-def _check_kill_switch(db: Database) -> bool:
-    """P0 审计修复: Kill Switch DB 版 — 无需重启进程即可生效
-    
-    同时检查环境变量和数据库中的 kill_switch 标志。
-    
-    Returns:
-        True:  kill switch 已激活，应停止所有交易
-        False: kill switch 未激活，可以正常交易
-    """
-    # 1. 环境变量（兼容旧方式）
-    if os.getenv("TRADING_KILL_SWITCH", "0") == "1":
-        logger.warning("🛑 KILL SWITCH active (env var)")
-        return True
-
-    # 2. 数据库（新方式 — 实时生效）
-    try:
-        row = db.conn.execute(
-            "SELECT value FROM system_config WHERE key = 'kill_switch'"
-        ).fetchone()
-        if row and row[0] == "1":
-            logger.warning("🛑 KILL SWITCH active (database)")
-            return True
-    except Exception as e:
-        logger.debug(f"Kill switch DB check failed: {e}")
-
-    return False
-
-
-def _try_acquire_order_lock(db: Database, symbol: str, direction: str, signal_id: str, minutes: int = 10) -> bool:
-    """P0 审计修复: 原子化竞态条件修复 + 幂等性保证
-    
-    合并冷却检查 + 订单锁定为一步操作，利用 SQLite 的 INSERT OR IGNORE 
-    防止并发进程之间的竞态条件。
-    
-    同时检查 signal_id 是否已在 trades 表中，实现幂等性。
-    
-    Returns:
-        True: 成功获取锁，可以继续下单
-        False: 信号已被处理或正在被处理，应跳过
-    """
-    try:
-        # 1. 幂等性检查：signal_id 是否已在 trades 表中（已执行过）
-        existing = db.conn.execute(
-            "SELECT COUNT(*) FROM trades WHERE signal_id = ? AND status IN ('submitted', 'filled', 'partial')",
-            (signal_id,)
-        ).fetchone()
-        if existing and existing[0] > 0:
-            logger.info(f"[{symbol}] ⏭️ 信号已执行 (signal_id={signal_id}), 跳过")
-            return False
-
-        # 2. 原子化锁定：INSERT OR IGNORE 利用 UNIQUE 约束防止重复
-        lock_key = f'order_lock:{signal_id}'
-        db.conn.execute(
-            """INSERT OR IGNORE INTO signal_cooldowns 
-               (symbol, direction, source, cooldown_until, reason) 
-               VALUES (?, ?, 'order_lock', datetime('now', ?), ?)""",
-            (symbol, direction, f'+{minutes} minutes', lock_key)
-        )
-        db.conn.commit()
-
-        # 3. 验证锁定是否成功（如果已有其他进程锁定，INSERT OR IGNORE 不会插入新记录）
-        row = db.conn.execute(
-            "SELECT reason FROM signal_cooldowns "
-            "WHERE symbol = ? AND direction = ? AND source = 'order_lock' "
-            "AND cooldown_until > datetime('now') "
-            "ORDER BY created_at DESC LIMIT 1",
-            (symbol, direction)
-        ).fetchone()
-
-        if row and row[0] == lock_key:
-            logger.info(f"[{symbol}] 🔒 订单锁定成功 (signal_id={signal_id})")
-            return True
-        else:
-            logger.info(f"[{symbol}] ⏭️ 已被其他进程锁定，跳过 (signal_id={signal_id})")
-            return False
-
-    except Exception as e:
-        logger.error(f"[{symbol}] 订单锁定失败: {e}")
-        return False  # 保守策略：锁定失败时跳过
 
 
 def _try_acquire_order_lock(db: Database, symbol: str, direction: str, signal_id: str, minutes: int = 10) -> bool:
@@ -481,62 +292,6 @@ def _try_acquire_order_lock(db: Database, symbol: str, direction: str, signal_id
     except Exception as e:
         logger.error(f"[{symbol}] Failed to acquire order lock: {e}")
         return False  # 保守策略：锁定失败时跳过
-
-
-def _try_acquire_order_lock(db: Database, signal_id: str, symbol: str, direction: str, minutes: int = 10) -> bool:
-    """P0 修复: 原子化检查+锁定 — 解决竞态条件
-    
-    使用 signal_id 作为幂等键，通过 INSERT OR IGNORE 实现原子操作。
-    如果 signal_id 已被处理过（在 signal_cooldowns 或 trades 表中），返回 False。
-    否则插入锁定记录并返回 True。
-    
-    Returns:
-        True: 成功获取锁，可以继续下单
-        False: 信号已被处理过，跳过
-    """
-    try:
-        # 1. 先检查 signal_id 是否已在 trades 表中（已成交或已提交）
-        existing = db.conn.execute(
-            "SELECT COUNT(*) FROM trades WHERE signal_id = ? AND status IN ('submitted', 'filled', 'partial')",
-            (signal_id,)
-        ).fetchone()
-        if existing and existing[0] > 0:
-            logger.info(f"⏭️ Signal {signal_id} already executed, skipping")
-            return False
-
-        # 2. 再检查订单冷却（快速路径）
-        if _check_order_cooldown(db, symbol, direction, minutes):
-            return False
-
-        # 3. 原子化锁定：利用 signal_cooldowns 的 source='order_lock' + signal_id
-        #    如果已存在相同 signal_id 的 order_lock，INSERT OR IGNORE 会静默失败
-        db.conn.execute(
-            """INSERT OR IGNORE INTO signal_cooldowns 
-               (symbol, direction, source, cooldown_until, reason) 
-               VALUES (?, ?, 'order_lock', datetime('now', ?), ?)""",
-            (symbol, direction, f'+{minutes} minutes', f'order_lock:{signal_id}')
-        )
-        db.conn.commit()
-        
-        # 4. 验证锁定是否成功（如果之前已有相同记录，INSERT OR IGNORE 不会插入）
-        lock_row = db.conn.execute(
-            "SELECT reason FROM signal_cooldowns "
-            "WHERE symbol = ? AND direction = ? AND source = 'order_lock' "
-            "AND cooldown_until > datetime('now') "
-            "ORDER BY created_at DESC LIMIT 1",
-            (symbol, direction)
-        ).fetchone()
-        
-        if lock_row and lock_row[0] == f'order_lock:{signal_id}':
-            logger.info(f"🔒 Order lock acquired: {symbol} {direction} (signal_id={signal_id})")
-            return True
-        else:
-            logger.info(f"⏭️ Signal {signal_id} already locked by another process, skipping")
-            return False
-            
-    except Exception as e:
-        logger.error(f"Failed to acquire order lock for {signal_id}: {e}")
-        return False
 
 
 def _ensure_vix_in_market_indicators(db: Database):
@@ -697,20 +452,24 @@ def check_risk_rules(db: Database, action: str, symbol: str, quantity: int,
     """
     # ─── Fix #9: Kill Switch ───
     if os.environ.get("TRADING_KILL_SWITCH") == "1":
+        alert(AlertLevel.P0, "Kill Switch Activated", "TRADING_KILL_SWITCH=1, all trading halted")
         return False, "KILL SWITCH ACTIVE — all trading halted"
 
     # ─── P0 审计修复: Kill Switch DB 版（实时生效，无需重启）───
     if _check_kill_switch(db):
+        alert(AlertLevel.P0, "Kill Switch Activated (DB)", "Kill switch set in database, all trading halted")
         return False, "KILL SWITCH ACTIVE (database) — all trading halted"
 
     # ─── Fix #1: Circuit Breaker ───
     cb_halted, cb_reason = check_circuit_breaker(db)
     if cb_halted:
+        alert(AlertLevel.P0, "Circuit Breaker Triggered", cb_reason)
         return False, f"CIRCUIT BREAKER: {cb_reason}"
 
     # ─── Fix #1: VIX regime — block new buys in panic mode ───
     vix_regime = get_vix_regime(db)
     if action == "buy" and vix_regime == "critical":
+        alert(AlertLevel.P0, "VIX Critical Regime", f"New buys blocked, VIX > {RISK_RULES.get('vix_critical', 40)}")
         return False, f"VIX critical regime — new buys blocked (VIX > {RISK_RULES.get('vix_critical', 40)})"
 
     # ─── 1. Daily trade limit ───
@@ -1386,6 +1145,8 @@ def execute_signals(specific_symbol: str = None, min_confidence: float = 0.5, dr
 
         if not passed:
             logger.warning(f"[{symbol}] Risk control BLOCKED: {reason}")
+            alert(AlertLevel.P1, f"Risk Control Blocked — {symbol}", reason,
+                  {"direction": _get_direction(signal), "confidence": signal.confidence, "source": _get_source(signal)})
             threshold_info = ""
             if dynamic.get("threshold") is not None:
                 delta = dynamic["threshold"] - dynamic.get("original_threshold", dynamic["threshold"])
