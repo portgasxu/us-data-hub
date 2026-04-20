@@ -910,6 +910,26 @@ def execute_alerts(specific_symbol: str = None, dry_run: bool = False) -> list:
     logger.info("Syncing positions from broker...")
     pm.sync_from_broker()
 
+    # ─── Fix #12: Startup cleanup — cancel stale market orders ───
+    # Market orders placed outside trading hours will sit as "NotReported".
+    # They should be cancelled to prevent accidental execution when market opens.
+    try:
+        orders = executor.get_orders()
+        stale_count = 0
+        for o in orders:
+            status = o.get("status", "")
+            order_type = o.get("order_type", "")
+            order_id = o.get("order_id", "")
+            # Cancel stale market orders that are pending
+            if status in ("NotReported", "Submitted", "Queued") and order_type == "MO":
+                logger.info(f"🗑️  Cancelling stale market order: {o.get('symbol')} {order_id} ({status})")
+                executor.cancel_order(order_id)
+                stale_count += 1
+        if stale_count > 0:
+            logger.info(f"✅ Cancelled {stale_count} stale market orders")
+    except Exception as e:
+        logger.warning(f"Failed to cleanup stale orders: {e}")
+
     # Run monitoring to get fresh alerts
     monitor = HoldingMonitor(db, pm)
     alerts = monitor.run_full_check()
@@ -996,6 +1016,14 @@ def execute_alerts(specific_symbol: str = None, dry_run: bool = False) -> list:
             })
             continue
 
+        # ─── Fix #12: Pending order dedup — skip if broker has pending order ───
+        if trade["action"] == "buy":
+            pending = _get_symbols_with_pending_orders()
+            if symbol.upper().replace(".US", "") in pending:
+                logger.info(f"[{symbol}] ⏭️  Pending broker order exists, skipping duplicate buy")
+                results.append({"symbol": symbol, "status": "skipped", "reason": "Pending order at broker"})
+                continue
+
         # Execute the trade
         decision = {
             "action": trade["action"],
@@ -1070,6 +1098,28 @@ def _get_todays_traded_symbols(db: Database) -> set:
         return set()
 
 
+def _get_symbols_with_pending_orders() -> set:
+    """Fix #12: Get symbols with pending/unfilled orders at broker.
+
+    Checks for orders in status: NotReported, Submitted, Queued, PartialFilled.
+    Prevents submitting duplicate orders when market is closed (orders sit pending).
+    """
+    pending_symbols = set()
+    pending_statuses = {"NotReported", "Submitted", "Queued", "PartialFilled", "Modified", "PendingCancel"}
+    try:
+        from executors.longbridge import LongbridgeExecutor
+        executor = LongbridgeExecutor()
+        orders = executor.get_orders()
+        for o in orders:
+            status = o.get("status", "")
+            symbol = o.get("symbol", "").replace(".US", "").upper()
+            if status in pending_statuses:
+                pending_symbols.add(symbol)
+    except Exception as e:
+        logger.warning(f"Failed to check pending orders: {e}")
+    return pending_symbols
+
+
 def execute_signals(specific_symbol: str = None, min_confidence: float = 0.5, dry_run: bool = False) -> list:
     """
     New unified entry: collect signals from ALL sources via SignalHub, execute trades.
@@ -1098,6 +1148,24 @@ def execute_signals(specific_symbol: str = None, min_confidence: float = 0.5, dr
         logger.info("✅ 启动对账完成")
     except Exception as e:
         logger.warning(f"⚠️ 启动对账失败: {e}")
+
+    # Fix #12: 启动清理 — 取消陈旧的盘外市价单
+    try:
+        executor = LongbridgeExecutor()
+        orders = executor.get_orders()
+        stale_count = 0
+        for o in orders:
+            status = o.get("status", "")
+            order_type = o.get("order_type", "")
+            order_id = o.get("order_id", "")
+            if status in ("NotReported", "Submitted", "Queued") and order_type == "MO":
+                logger.info(f"🗑️  Cancelling stale market order: {o.get('symbol')} {order_id} ({status})")
+                executor.cancel_order(order_id)
+                stale_count += 1
+        if stale_count > 0:
+            logger.info(f"✅ Cancelled {stale_count} stale market orders")
+    except Exception as e:
+        logger.warning(f"Failed to cleanup stale orders: {e}")
 
     # P1 审计修复: 公司行动处理 — 拆股/分红等
     logger.info("🏢 [P1 审计修复] 检查公司行动...")
@@ -1170,15 +1238,26 @@ def execute_signals(specific_symbol: str = None, min_confidence: float = 0.5, dr
     # sell signals (e.g. MSFT reduce) to bypass this filter.
     # Otherwise a concentration-reduce signal will always be blocked.
     traded_today = _get_todays_traded_symbols(db)
-    if traded_today:
+
+    # Fix #12: Pending order dedup — check broker for unfilled orders
+    # When market is closed, MO orders sit as "NotReported". Without this check,
+    # every run submits duplicate orders.
+    pending_orders = _get_symbols_with_pending_orders()
+    if pending_orders:
+        logger.info(f"⚠️  Broker has pending orders for: {pending_orders}")
+
+    # Combine both dedup sets (only block BUY, allow SELL)
+    blocked_symbols = traded_today | pending_orders
+    if blocked_symbols:
         orig_count = len(tradable)
         tradable = [
             s for s in tradable
-            if s.symbol not in traded_today or _get_direction(s) in ("sell",)
+            if s.symbol not in blocked_symbols or _get_direction(s) in ("sell",)
         ]
         filtered = orig_count - len(tradable)
         if filtered > 0:
-            logger.info(f"Same-day dedup: filtered {filtered} BUY signals for already-traded symbols: {traded_today}")
+            buy_blocked = set(traded_today) | set(pending_orders)
+            logger.info(f"Same-day + Pending dedup: filtered {filtered} BUY signals. Blocked: {buy_blocked}")
 
     if not tradable:
         logger.info("No tradable signals from any source")
@@ -1453,7 +1532,7 @@ def main():
     parser.add_argument("--show-cb-status", action="store_true",
                         help="Show circuit breaker status and exit")
     # P0: 新增时段策略相关参数
-    parser.add_argument("--mode", choices=["full-loop", "screener", "review", "morning-brief", "holding-monitor"],
+    parser.add_argument("--mode", choices=["full-loop", "screener-to-trade", "review", "morning-brief", "holding-monitor", "order-monitor"],
                         help="运行模式 (替代原有的 --full-loop)")
     parser.add_argument("--show-session", action="store_true",
                         help="显示当前交易时段状态并退出")
@@ -1493,8 +1572,170 @@ def main():
 
     # P0: 支持 --mode 参数
     use_full_loop = args.full_loop or (args.mode == "full-loop")
+    use_screener_to_trade = (args.mode == "screener-to-trade")
+    use_review = (args.mode == "review")
+    use_morning_brief = (args.mode == "morning-brief")
+    use_holding_monitor = (args.mode == "holding-monitor")
+    use_order_monitor = (args.mode == "order-monitor")
 
-    if use_full_loop:
+    # === 订单监控模式：监控 pending 订单 ===
+    if use_order_monitor:
+        logger.info("📋 启动订单监控")
+        from monitoring.order_monitor import OrderMonitor
+        from executors.longbridge import LongbridgeExecutor
+        db = Database()
+        db.init_schema()
+        executor = LongbridgeExecutor()
+        monitor = OrderMonitor(db, executor)
+        results = monitor.run_full_check()
+
+        print(f"\n{'='*60}")
+        print(f"📋 Order Monitor Results")
+        print(f"{'='*60}")
+        print(f"  Checked:          {results['checked']}")
+        print(f"  Filled:           {len(results['filled'])}")
+        print(f"  Partial Filled:   {len(results['partial_filled'])}")
+        print(f"  Cancelled (gap):  {len(results['cancelled_price_gap'])}")
+        print(f"  Cancelled (time): {len(results['cancelled_timeout'])}")
+        print(f"  Cancelled (stale):{len(results['cancelled_stale'])}")
+        print(f"  Kept:             {len(results['kept'])}")
+        print(f"{'='*60}")
+
+        # 打印详情
+        for item in results['filled']:
+            print(f"  ✅ {item['symbol']}: FILLED {item['executed_qty']}/{item['total_qty']}")
+        for item in results['cancelled_price_gap']:
+            print(f"  🚨 {item['symbol']}: Cancelled (gap {item['gap_pct']:+.1%})")
+        for item in results['cancelled_timeout']:
+            print(f"  ⏰ {item['symbol']}: Cancelled (timeout {item['minutes_pending']:.0f}min)")
+        for item in results['cancelled_stale']:
+            print(f"  🗑️  {item['symbol']}: Cancelled (stale)")
+
+        db.close()
+        return
+
+    # === 复盘模式：不执行交易，只做盘后分析 ===
+    if use_review:
+        logger.info("📊 启动盘后复盘")
+        from management.position_manager import PositionManager
+        from executors.longbridge import LongbridgeExecutor
+        db = Database()
+        db.init_schema()
+        executor = LongbridgeExecutor()
+        pm = PositionManager(db, executor)
+        pm.sync_from_broker()
+
+        # 今日交易汇总
+        today = datetime.now().strftime("%Y-%m-%d")
+        trades = db.conn.execute(
+            "SELECT symbol, direction, quantity, price, timestamp FROM trades WHERE timestamp >= ? ORDER BY timestamp",
+            (f"{today} 00:00:00",)
+        ).fetchall()
+        print(f"\n{'='*60}")
+        print(f"📊 盘后复盘 ({today})")
+        print(f"{'='*60}")
+        if trades:
+            print(f"  今日交易: {len(trades)} 笔")
+            for t in trades:
+                arrow = "📈" if t[1] == "buy" else "📉"
+                print(f"    {arrow} {t[0]} {t[1]} {t[2]} @ ${t[3]:.2f} ({t[4]})")
+        else:
+            print(f"  今日无交易")
+
+        # 持仓盈亏
+        pnl = pm.get_pnl_summary()
+        print(f"\n  持仓盈亏:")
+        for h in pnl.get('holdings', []):
+            price = h.get('current_price') or h['cost_price']
+            pnl_pct = h.get('pnl_pct', 0)
+            emoji = "🟢" if pnl_pct >= 0 else "🔴"
+            print(f"    {emoji} {h['symbol']:6s} {h['quantity']:>4} 成本${h['cost_price']:.2f} → 现${price:.2f} ({pnl_pct:+.2f}%)")
+
+        print(f"\n  总P&L: ${pnl.get('total_pnl', 0):+,.2f} ({pnl.get('total_pnl_pct', 0):+.2f}%)")
+        print(f"{'='*60}")
+        db.close()
+        return
+
+    # === 晨报模式：不执行交易，生成盘前简报 ===
+    if use_morning_brief:
+        logger.info("📰 启动盘前晨报")
+        from management.position_manager import PositionManager
+        from executors.longbridge import LongbridgeExecutor
+        db = Database()
+        db.init_schema()
+        executor = LongbridgeExecutor()
+        pm = PositionManager(db, executor)
+        pm.sync_from_broker()
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        print(f"\n{'='*60}")
+        print(f"📰 盘前晨报 ({today})")
+        print(f"{'='*60}")
+
+        # 持仓概览
+        pnl = pm.get_pnl_summary()
+        print(f"\n  持仓概览 ({pnl.get('holding_count', 0)} 只):")
+        for h in pnl.get('holdings', []):
+            price = h.get('current_price') or h['cost_price']
+            pnl_pct = h.get('pnl_pct', 0)
+            emoji = "🟢" if pnl_pct >= 0 else "🔴"
+            print(f"    {emoji} {h['symbol']:6s} 权重{h.get('weight_pct', 0):.1f}% P&L {pnl_pct:+.2f}%")
+
+        # 今日待关注
+        print(f"\n  今日关注:")
+        # 读取 screener 最新结果
+        import glob
+        screens = sorted(glob.glob("output/screen_*.json"), reverse=True)
+        if screens:
+            with open(screens[0]) as f:
+                screener_data = json.load(f)
+            picks = screener_data.get("top_filtered", [])[:5]
+            print(f"    最新选股 ({screener_data.get('timestamp', 'N/A')}):")
+            for p in picks:
+                print(f"      #{p['rank']} {p['symbol']} score={p['score']:.3f}")
+        else:
+            print(f"    无最新选股数据")
+
+        print(f"{'='*60}")
+        db.close()
+        return
+
+    # === 交易执行模式 ===
+    if use_screener_to_trade:
+        # 完整流水线：选股 → TradingAgents分析 → 自动执行
+        logger.info("🚀 启动 Screener-to-Trade 完整流水线")
+        from scripts.screen_to_trade import screen_and_analyze
+
+        # 步骤1：选股 + TradingAgents 分析（带持仓去重）
+        screen_result = screen_and_analyze(
+            top_n=5,
+            min_score=0.3,
+            run_trading=True,
+        )
+
+        if "error" in screen_result:
+            print(f"❌ 选股失败: {screen_result['error']}")
+            return
+
+        # 步骤2：将 TradingAgents 输出的 signals 注入 execute_signals
+        ta_signals = screen_result.get("signals_from_ta", [])
+        if not ta_signals:
+            print("⏭️  TradingAgents 未产生有效信号")
+            # 打印选股结果
+            summary = screen_result.get("screen_summary", {})
+            print(f"\n📊 选股结果: {summary.get('final_count', 0)} 只候选")
+            for pick in summary.get("top_picks", []):
+                print(f"  {pick['symbol']:6s} 总分={pick['total_score']:.3f}")
+            return
+
+        # 步骤3：执行信号
+        results = execute_signals(
+            specific_symbol=None,
+            min_confidence=args.min_confidence,
+            dry_run=args.dry_run,
+        )
+
+    elif use_full_loop:
         results = execute_signals(
             specific_symbol=args.symbol if args.symbol else None,
             min_confidence=args.min_confidence,
@@ -1508,7 +1749,14 @@ def main():
 
     if results:
         print(f"\n{'='*80}")
-        mode = "FULL-LOOP + 动态阈值" if use_full_loop else "HOLDING-MONITOR"
+        if use_screener_to_trade:
+            mode = "SCREENER-TO-TRADE"
+        elif use_full_loop:
+            mode = "FULL-LOOP + 动态阈值"
+        elif use_holding_monitor:
+            mode = "HOLDING-MONITOR"
+        else:
+            mode = "AUTO-EXECUTE"
         print(f"Auto-Trade Execution Results [{mode}] ({datetime.now().strftime('%H:%M:%S')})")
         print(f"{'='*80}")
         for r in results:

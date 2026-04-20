@@ -224,6 +224,14 @@ def screen_and_analyze(top_n: int = 10,
                         extra={"full_decision": decision_text, "result": result},
                     )
                     signals_from_ta.append(ts)
+
+                    # v6.1: 注入 SignalHub，使 auto_execute 能消费
+                    try:
+                        hub = SignalHub(db, min_confidence=0.3)
+                        hub.add_signal(ts)
+                        logger.info(f"✅ Signal injected into SignalHub: {symbol} {direction.value} conf={confidence:.2f}")
+                    except Exception as e:
+                        logger.warning(f"SignalHub injection failed for {symbol}: {e}")
             except Exception as e:
                 logger.error(f"Trading analysis failed for {symbol}: {e}")
                 trading_results[symbol] = {"error": str(e)}

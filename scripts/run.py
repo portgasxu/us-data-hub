@@ -87,17 +87,64 @@ def cmd_collect():
 
 
 def cmd_screener():
-    """Run stock screener."""
+    """Run stock screener with holding deduplication."""
+    import json
     from analysis.screener import StockScreener
+    from executors.longbridge import LongbridgeExecutor
+    from management.position_manager import PositionManager
+
     db = Database()
+
+    # 获取当前持仓
+    executor = LongbridgeExecutor()
+    pm = PositionManager(db, executor)
+    pm.sync_from_broker()
+    holdings = pm.get_holdings()
+    holding_symbols = set(h["symbol"] for h in holdings)
+
+    # 选股：先选 top_n * 2，确保去重后仍有足够的候选
     screener = StockScreener(db)
-    results = screener.screen(top_n=20, min_score=0.3)
+    results = screener.screen(top_n=40, min_score=0.3)
     if not results:
         print("No stocks passed screening")
-    else:
-        print(f"\n🔍 Top {len(results)} stocks:")
-        for i, r in enumerate(results, 1):
-            print(f"  {i:2d}. {r['symbol']:6s} score={r['total_score']:.3f}")
+        db.close()
+        return
+
+    # 去重：过滤掉已持仓的股票，再取前 20
+    filtered = [r for r in results if r["symbol"] not in holding_symbols]
+    top_filtered = filtered[:20]
+
+    if not top_filtered:
+        print("⚠️ 所有选股结果均为已持仓股票")
+        db.close()
+        return
+
+    # 输出持仓去重信息
+    print(f"📦 当前持仓 ({len(holding_symbols)}): {', '.join(sorted(holding_symbols))}")
+    print(f"🔍 原始候选: {len(results)} 只 → 去重后: {len(filtered)} 只 → 取前 {len(top_filtered)} 只")
+    print()
+
+    # 保存结果
+    output_data = {
+        "timestamp": datetime.now().isoformat(),
+        "holdings": sorted(holding_symbols),
+        "top_filtered": [
+            {"rank": i, "symbol": r["symbol"], "score": r["total_score"]}
+            for i, r in enumerate(top_filtered, 1)
+        ],
+    }
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    output_path = f"output/screen_{ts}.json"
+    with open(output_path, "w") as f:
+        json.dump(output_data, f, indent=2, ensure_ascii=False)
+    print(f"💾 已保存: {output_path}")
+    print()
+
+    # 打印结果
+    print(f"🔍 今日选股 Top {len(top_filtered)} (已去重持仓):")
+    for i, r in enumerate(top_filtered, 1):
+        print(f"  {i:2d}. {r['symbol']:6s} score={r['total_score']:.3f}")
+
     db.close()
 
 
@@ -267,7 +314,8 @@ def main():
                         choices=["init", "status", "collect", "screener",
                                  "factors", "monitor", "report", "backtest",
                                  "auto-trade", "trading-agent", "alphalens",
-                                 "pipeline", "screen-to-trade"])
+                                 "pipeline", "screen-to-trade", "order-monitor",
+                                 "start", "stop", "restart", "check"])
     args, remaining = parser.parse_known_args()
     sys.argv = [sys.argv[0]] + remaining  # Pass remaining args to sub-commands
 
@@ -285,6 +333,11 @@ def main():
         "alphalens": cmd_alphalens,
         "pipeline": cmd_pipeline,
         "screen-to-trade": cmd_screen_to_trade,
+        "order-monitor": cmd_order_monitor,
+        "start": lambda: __import__('scripts.system_manager', fromlist=['cmd_start']).cmd_start(),
+        "stop": lambda: __import__('scripts.system_manager', fromlist=['cmd_stop']).cmd_stop(),
+        "restart": lambda: __import__('scripts.system_manager', fromlist=['cmd_restart']).cmd_restart(),
+        "check": lambda: __import__('scripts.system_manager', fromlist=['cmd_check']).cmd_check(),
     }
 
     commands[args.command]()
@@ -299,6 +352,39 @@ def cmd_alphalens():
         days=180, quantiles=5, periods=(1, 5, 10),
         output_dir='data/processed'
     )
+
+
+def cmd_order_monitor():
+    """Monitor pending orders."""
+    import argparse as _ap
+    from monitoring.order_monitor import OrderMonitor
+
+    parser = _ap.ArgumentParser(description="Order Monitor", add_help=False)
+    parser.add_argument("--mode", choices=["check", "cleanup"], default="check",
+                       help="check=监控 pending 订单, cleanup=盘后清理")
+    args, _ = parser.parse_known_args()
+
+    db = Database()
+    db.init_schema()
+    executor = LongbridgeExecutor()
+    monitor = OrderMonitor(db, executor)
+
+    if args.mode == "check":
+        results = monitor.run_full_check()
+    elif args.mode == "cleanup":
+        results = monitor.run_cleanup()
+
+    print(f"\n{'='*60}")
+    print(f"📋 Order Monitor Results")
+    print(f"{'='*60}")
+    for k, v in results.items():
+        if isinstance(v, list):
+            print(f"  {k}: {len(v)}")
+        else:
+            print(f"  {k}: {v}")
+    print(f"{'='*60}")
+
+    db.close()
 
 
 if __name__ == "__main__":
