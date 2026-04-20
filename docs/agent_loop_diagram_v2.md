@@ -1,7 +1,7 @@
 # 美股自动交易系统 — Agent Loop 架构图 v3.5
 
 > 更新时间: 2026-04-20 16:57
-> 更新内容: v3.5 P1 代码质量加固 + 滚动回撤 + 实时告警 + 小盘股限价单 + 20 个单元测试
+> 更新内容: v3.5 L3 代码自愈 + 滚动回撤 + 实时告警 + 小盘股限价单 + 20 个单元测试
 > 覆盖: JVS大脑 / 订单监控 / 价格采集 / 系统管理器 / 持仓去重 / Pending去重 / Screener-to-Trade 全链路 / 独立复盘晨报
 
 ---
@@ -612,9 +612,13 @@ validate_strategy.py → feedback_loop.py → screener_config.json → screener 
 | 18 | 选股未去重持仓 | 持仓去重 + 顺延逻辑 | ✅ |
 | 19 | 一键启动缺失 | System Manager 一键启动所有 | ✅ |
 | 20 | 代码重复定义/解析脆弱/无回撤/无告警 | v3.5 P1 代码质量加固 | ✅ |
+| 21 | 模块反复重启仍无法解决 | L3 代码自愈: LLM根因分析 + 自动修复代码 | ✅ |
 
-### v3.5 P1 代码质量加固
+### v3.5 L3 代码自愈 + 质量加固
 
+- **L3 代码自愈** — Orchestrator 新增 `auto_fix` action：收集日志上下文 → 调用 CodingPlan LLM 根因分析 → 自动生成修复代码 → 写入文件 → Git commit → 重启验证 → 生成修复报告
+- **自愈安全边界** — 同一模块最多 2 次尝试，不修改数据库/密钥/配置，每次修复前自动 commit 可回滚
+- **规则引擎集成** — LLM 不可用时 fallback 也会自动尝试 auto_fix
 - **重复定义清理** — `auto_execute.py` 中 `_try_acquire_order_lock` 4→1、`_check_kill_switch` 2→1、`RISK_RULES` 2→1
 - **LLM 输出解析** — 三步降级（markdown → 正则 → 纯 JSON）+ schema 校验
 - **滚动回撤** — 新增 5日/$1500、20日/$3000、总回撤 10% 三维检查

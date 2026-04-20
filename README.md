@@ -21,7 +21,11 @@
 - **策略反馈闭环** — 胜率/Sharpe/回撤自动反馈 → 动态调整选股权重
 - **全链路可追溯** — Trace ID + Event Bus + 结构化日志
 
-### 🧠 v3.5 P1 代码质量加固（2026-04-20）
+### 🧠 v3.5 L3 代码自愈 + 质量加固（2026-04-20）
+
+- **L3 代码自愈** — Orchestrator 新增 `auto_fix` action：收集日志上下文 → 调用 CodingPlan LLM 根因分析 → 自动生成修复代码 → 写入文件 → Git commit → 重启验证 → 生成报告
+- **自愈安全边界** — 同一模块最多 2 次尝试，不修改数据库/密钥/配置，每次修复前自动 commit 可回滚
+- **规则引擎集成** — LLM 不可用时 fallback 也会自动尝试 auto_fix
 
 - **重复定义清理** — `auto_execute.py` 中 `_try_acquire_order_lock` 4→1、`RISK_RULES` 2→1、`_check_kill_switch` 2→1，删除 336 行冗余代码
 - **LLM 输出解析加固** — 三步降级（markdown 代码块 → 正则 → 纯 JSON）+ schema 校验，解决 markdown 方括号误匹配
