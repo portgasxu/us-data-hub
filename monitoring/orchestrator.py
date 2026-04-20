@@ -120,6 +120,16 @@ MODULE_REGISTRY: Dict[str, ModuleConfig] = {
         schedule="",
         description="采集实时价格数据",
     ),
+    "data_collector": ModuleConfig(
+        id="data_collector",
+        name="数据全量采集",
+        command="python3 scripts/collect.py --source all",
+        critical=True,
+        max_consecutive_failures=2,
+        run_mode="scheduled",
+        schedule="*/30",  # 每30分钟全量采集
+        description="采集 Google News + SEC + Longbridge 新闻 + Reddit（v3.4 Crontab退场后遗漏的调度）",
+    ),
     "watcher": ModuleConfig(
         id="watcher",
         name="新闻监控",
@@ -127,6 +137,7 @@ MODULE_REGISTRY: Dict[str, ModuleConfig] = {
         critical=True,
         run_mode="scheduled",
         schedule="*/15",
+        depends_on=["data_collector"],
         description="扫描新闻和Reddit情绪",
     ),
     "screener": ModuleConfig(

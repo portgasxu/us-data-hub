@@ -18,6 +18,7 @@ from typing import List, Dict, Optional
 from config.stock_universe import (
     STOCK_UNIVERSE, HOT_INDUSTRIES, GROWTH_METRICS,
     get_all_symbols, get_growth_info,
+    calc_dynamic_industry_heat,
 )
 
 logger = logging.getLogger(__name__)
@@ -251,16 +252,20 @@ class ThreeLayerScreener:
         themes = stock_info.get("themes", [])
         detail["themes"] = themes
 
-        # 计算匹配的风口行业总分
+        # 计算匹配的风口行业总分（v3.7: 使用动态行业热度）
         total_heat = 0.0
         matched_themes = []
+
+        # 获取动态行业热度
+        dynamic_heat = calc_dynamic_industry_heat(db=self.db)
+
         for theme in themes:
             # 找到包含该 theme 的行业
             for ind_name, ind_info in HOT_INDUSTRIES.items():
                 if theme in ind_info.get("key_themes", []):
-                    heat = ind_info.get("heat_score", 0) / 10.0  # 归一化到 0-1
+                    heat = dynamic_heat.get(ind_name, ind_info["base_score"]) / 10.0  # 归一化到 0-1
                     total_heat += heat
-                    matched_themes.append(f"{ind_name}(heat={heat:.1f})")
+                    matched_themes.append(f"{ind_name}(heat={heat:.2f}, dynamic)")
 
         detail["matched_themes"] = matched_themes
         detail["industry_heat"] = round(total_heat, 4)
