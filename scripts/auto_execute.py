@@ -1469,7 +1469,7 @@ def main():
 
         # 步骤1：选股 + TradingAgents 分析（带持仓去重）
         screen_result = screen_and_analyze(
-            top_n=5,
+            top_n=10,
             min_score=0.3,
             run_trading=True,
         )
