@@ -123,7 +123,7 @@ MODULE_REGISTRY: Dict[str, ModuleConfig] = {
     "watcher": ModuleConfig(
         id="watcher",
         name="新闻监控",
-        command="python3 scripts/watcher.py",
+        command="python3 scripts/watcher.py --once",
         critical=True,
         run_mode="scheduled",
         schedule="*/15",
@@ -689,10 +689,17 @@ class ModuleExecutor:
         if status == ModuleStatus.RUNNING.value:
             return False
 
+        # 连续运行模式（daemon）：只要没在运行就启动
+        if config.run_mode == "continuous":
+            return True
+
         # 检查调度时间
         now = datetime.now()
         minute = now.minute
         schedule = config.schedule
+
+        if not schedule:
+            return False
 
         if "/" in schedule:
             # 例如 "*/5" = 每5分钟

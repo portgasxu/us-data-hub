@@ -341,7 +341,7 @@ class OrderMonitor:
         try:
             from executors.longbridge import LongbridgeExecutor
             ex = LongbridgeExecutor()
-            args = ["orders", "--format", "json"]
+            args = ["order", "--format", "json"]
             data = ex._run(args)
             if data and isinstance(data, list):
                 for o in data:
