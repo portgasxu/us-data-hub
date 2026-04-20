@@ -225,6 +225,7 @@ class BrainState:
     modules: Dict[str, ModuleState] = field(default_factory=dict)
     alerts: List[Dict] = field(default_factory=list)
     llm_decisions: List[Dict] = field(default_factory=list)
+    extra_data: Dict[str, Any] = field(default_factory=dict)  # 自愈尝试计数等扩展数据
     uptime_seconds: int = 0
 
 
@@ -428,20 +429,29 @@ class LLMBrain:
         system_prompt = """你是 US Data Hub 美股自动交易系统的调度大脑。
 
 你的职责:
-1. 根据系统状态，决定每个模块是否需要启动/停止/重启
+1. 根据系统状态，决定每个模块是否需要启动/停止/重启/代码自愈
 2. 识别潜在问题并提前处理
 3. 在市场状态变化时调整调度策略
 
 规则:
 - 非交易时段，只需保持基础监控（价格采集+订单监控）
 - 交易时段，所有关键模块必须运行
-- 模块连续失败超过阈值，标记为 disabled 并告警
+- 模块连续失败超过阈值，使用 auto_fix 尝试代码级修复
+- 如果 auto_fix 已尝试过且仍失败，标记为 disabled 并告警
 - 模块完成了一次性任务后，状态变为 completed
+
+可用 action:
+- start: 启动模块
+- stop: 停止模块（连续失败超阈值时）
+- restart: 重启模块（进程意外退出时）
+- auto_fix: 代码级自愈（重启无法解决的重复性故障）
+- skip: 跳过（非交易时段或一次性任务已完成）
+- monitor: 保持观察（轻微异常但不影响运行）
 
 请严格以 JSON 格式返回决策，不要输出其他内容:
 {
   "decisions": [
-    {"module": "模块ID", "action": "start|stop|restart|skip|monitor", "reason": "原因"}
+    {"module": "模块ID", "action": "start|stop|restart|auto_fix|skip|monitor", "reason": "原因"}
   ],
   "alerts": [
     {"level": "info|warning|critical", "module": "模块ID", "message": "告警内容"}
@@ -561,24 +571,37 @@ class LLMBrain:
             if not config:
                 continue
 
-            if state["status"] == "failed" and state["consecutive_failures"] >= config.max_consecutive_failures:
-                decisions.append({
-                    "module": module_id,
-                    "action": "stop",
-                    "reason": f"连续失败 {state['consecutive_failures']} 次，停止等待人工介入",
-                })
+            failures = state["consecutive_failures"]
+            status = state["status"]
+
+            if status == "failed" and failures >= config.max_consecutive_failures:
+                # 超过阈值但未超过 L3 尝试上限 → 先试代码自愈
+                auto_fix_key = f"{module_id}_auto_fix_attempts"
+                fix_attempts = self.memory.state.extra_data.get(auto_fix_key, 0)
+                if fix_attempts < 2 and is_trading:
+                    decisions.append({
+                        "module": module_id,
+                        "action": "auto_fix",
+                        "reason": f"连续失败 {failures} 次，重启无效，尝试代码级自愈",
+                    })
+                else:
+                    decisions.append({
+                        "module": module_id,
+                        "action": "stop",
+                        "reason": f"连续失败 {failures} 次，自动修复已耗尽，停止等待人工介入",
+                    })
                 alerts.append({
                     "level": "critical",
                     "module": module_id,
-                    "message": f"连续失败 {state['consecutive_failures']} 次",
+                    "message": f"连续失败 {failures} 次",
                 })
-            elif state["status"] == "failed" and is_trading:
+            elif status == "failed" and is_trading:
                 decisions.append({
                     "module": module_id,
                     "action": "restart",
                     "reason": f"交易时段失败，尝试重启",
                 })
-            elif state["status"] == "idle" and config.critical and is_trading:
+            elif status == "idle" and config.critical and is_trading:
                 decisions.append({
                     "module": module_id,
                     "action": "start",
@@ -944,6 +967,8 @@ class OrchestratorBrain:
                     self.executor.stop_module(module_id, config)
                     time.sleep(5)
                     self.executor.start_module(module_id, config)
+                elif action == "auto_fix":
+                    self._auto_fix_module(module_id, config, reason)
 
                 # 记录决策
                 state = self.memory.get_module_state(module_id)
@@ -957,6 +982,245 @@ class OrchestratorBrain:
         except Exception as e:
             logger.error(f"LLM cycle error: {e}")
             self.memory.add_alert("warning", "brain", f"LLM 决策失败: {e}")
+
+    def _auto_fix_module(self, module_id: str, config: ModuleConfig, reason: str):
+        """L3 自愈：LLM 根因分析 + 代码自动修复
+
+        流程：
+        1. 收集上下文（日志 + 错误堆栈 + 数据库状态）
+        2. 调用 CodingPlan LLM 分析根因并生成修复代码
+        3. 自动执行修复（写入文件）
+        4. Git commit 存档
+        5. 重启模块并验证
+        6. 生成修复报告
+        """
+        logger.info(f"🔧 [L3 自愈] 开始对 {config.name} 进行根因分析 + 代码修复")
+
+        try:
+            # ── 步骤1: 收集上下文 ──
+            context = self._collect_module_context(module_id, config)
+            self.memory.add_alert("info", module_id, f"L3 自愈启动: 收集到 {len(context)} 行上下文")
+
+            # ── 步骤2: LLM 根因分析 + 修复方案 ──
+            fix_result = self._llm_analyze_and_fix(module_id, config, context)
+            if not fix_result:
+                logger.warning(f"🔧 [L3 自愈] {config.name}: LLM 无法生成修复方案")
+                self.memory.add_alert("warning", module_id, "L3 自愈: LLM 无法生成修复方案，需人工介入")
+                return
+
+            # ── 步骤3: 执行修复 ──
+            success = self._apply_fix(fix_result)
+            if not success:
+                logger.warning(f"🔧 [L3 自愈] {config.name}: 修复应用失败")
+                self.memory.add_alert("critical", module_id, f"L3 自愈: 修复应用失败")
+                return
+
+            # ── 步骤4: Git commit ──
+            self._commit_fix(fix_result, module_id)
+
+            # ── 步骤5: 重启模块 ──
+            self.executor.stop_module(module_id, config)
+            time.sleep(3)
+            started = self.executor.start_module(module_id, config)
+
+            # 记录自愈尝试次数
+            auto_fix_key = f"{module_id}_auto_fix_attempts"
+            self.memory.state.extra_data[auto_fix_key] = self.memory.state.extra_data.get(auto_fix_key, 0) + 1
+
+            if started:
+                logger.info(f"✅ [L3 自愈] {config.name}: 修复完成，模块已重启")
+                self.memory.add_alert("info", module_id,
+                    f"L3 自愈完成: {fix_result.get('summary', '修复成功')}")
+                # 重置失败计数
+                state = self.memory.get_module_state(module_id)
+                if isinstance(state, dict):
+                    state["consecutive_failures"] = 0
+                else:
+                    state.consecutive_failures = 0
+            else:
+                logger.error(f"❌ [L3 自愈] {config.name}: 修复后重启失败")
+                self.memory.add_alert("critical", module_id, "L3 自愈: 修复成功但重启失败")
+
+        except Exception as e:
+            logger.error(f"🔧 [L3 自愈] {config.name}: 异常 {e}")
+            self.memory.add_alert("critical", module_id, f"L3 自愈异常: {e}")
+
+    def _collect_module_context(self, module_id: str, config: ModuleConfig) -> str:
+        """收集模块相关上下文信息"""
+        lines = []
+
+        # 1. 模块日志
+        log_files = [
+            f"logs/{module_id}.log",
+            f"logs/orchestrator_stdout.log",
+        ]
+        for lf in log_files:
+            if os.path.exists(lf):
+                try:
+                    with open(lf, 'r') as f:
+                        all_lines = f.readlines()
+                        last_lines = all_lines[-200:]  # 最近 200 行
+                        lines.append(f"=== {lf} (最后200行) ===")
+                        lines.extend(last_lines)
+                except Exception:
+                    pass
+
+        # 2. 模块配置
+        lines.append(f"=== 模块配置 ===")
+        lines.append(f"ID: {config.id}")
+        lines.append(f"Command: {config.command}")
+        lines.append(f"Critical: {config.critical}")
+        lines.append(f"Max failures: {config.max_consecutive_failures}")
+        lines.append(f"Restart cooldown: {config.restart_cooldown}s")
+
+        # 3. 模块状态
+        state = self.memory.get_module_state(module_id)
+        lines.append(f"=== 当前状态 ===")
+        if isinstance(state, dict):
+            lines.append(json.dumps(state, indent=2, ensure_ascii=False))
+        else:
+            lines.append(f"status={state.status}, failures={state.consecutive_failures}")
+
+        # 4. 最近决策历史
+        lines.append(f"=== 最近决策 ===")
+        for d in self.memory.state.recent_decisions[-10:]:
+            lines.append(json.dumps(d, ensure_ascii=False))
+
+        # 5. 数据库状态检查
+        try:
+            from storage import Database
+            db = Database()
+            for table in ("prices", "trades", "holdings"):
+                try:
+                    row = db.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+                    lines.append(f"DB {table}: {row[0]} rows")
+                except Exception as e:
+                    lines.append(f"DB {table}: ERROR {e}")
+            db.close()
+        except Exception as e:
+            lines.append(f"DB check: ERROR {e}")
+
+        return "\n".join(lines)
+
+    def _llm_analyze_and_fix(self, module_id: str, config: ModuleConfig, context: str) -> Optional[Dict]:
+        """调用 CodingPlan LLM 分析根因并生成修复代码"""
+        system_prompt = """你是资深 Python 工程师，负责维护一个美股自动交易系统。
+现在有一个模块出现问题，你需要：
+1. 分析日志和上下文，找出根因
+2. 定位到具体的文件和代码行
+3. 给出精确的修复方案（包含修改前后的代码对比）
+4. 评估影响范围
+
+请以 JSON 格式返回：
+{
+  "root_cause": "根因描述",
+  "file_path": "需要修改的文件路径（相对路径）",
+  "fix_type": "code_fix|config_change|log_level",
+  "old_code": "需要替换的旧代码（精确匹配）",
+  "new_code": "新代码",
+  "rationale": "为什么这样修复",
+  "impact": "影响范围评估",
+  "summary": "一句话总结"
+}
+
+如果无法从上下文中找到明确的代码级问题，返回 {"fixable": false, "reason": "原因"}。"""
+
+        user_input = f"模块 {config.name} ({module_id}) 出现问题：\n\n{context}"
+
+        try:
+            from analysis.llm_router import LLMRouter
+            router = LLMRouter()
+            result = router.invoke(
+                task_type="portfolio_manager",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_input},
+                ],
+                temperature=0.1,
+                max_tokens=2000,
+            )
+            if result.get("success"):
+                content = result["content"].strip()
+                # 提取 JSON
+                import re
+                if "```json" in content:
+                    content = content.split("```json")[1].split("```")[0].strip()
+                elif "```" in content:
+                    content = content.split("```")[1].strip()
+                return json.loads(content)
+        except Exception as e:
+            logger.warning(f"LLM 根因分析失败: {e}")
+
+        return None
+
+    def _apply_fix(self, fix_result: Dict) -> bool:
+        """执行 LLM 生成的修复方案"""
+        if fix_result.get("fixable") is False:
+            logger.info(f"LLM 判定无法自动修复: {fix_result.get('reason', '')}")
+            return False
+
+        file_path = fix_result.get("file_path")
+        if not file_path:
+            return False
+
+        # 确保路径正确
+        if not os.path.isabs(file_path):
+            file_path = os.path.join(PROJECT_ROOT, file_path)
+
+        if not os.path.exists(file_path):
+            logger.warning(f"修复文件不存在: {file_path}")
+            return False
+
+        fix_type = fix_result.get("fix_type", "code_fix")
+        old_code = fix_result.get("old_code", "")
+        new_code = fix_result.get("new_code", "")
+
+        try:
+            with open(file_path, 'r') as f:
+                original_content = f.read()
+
+            if fix_type == "code_fix" and old_code and new_code:
+                if old_code not in original_content:
+                    logger.warning(f"旧代码未在文件中找到: {file_path}")
+                    return False
+                updated_content = original_content.replace(old_code, new_code, 1)
+            elif fix_type == "log_level":
+                # 简单替换日志级别
+                updated_content = original_content.replace(old_code, new_code, 1)
+            else:
+                logger.warning(f"未知修复类型: {fix_type}")
+                return False
+
+            with open(file_path, 'w') as f:
+                f.write(updated_content)
+
+            logger.info(f"✅ 修复已应用: {file_path} ({fix_type})")
+            return True
+
+        except Exception as e:
+            logger.error(f"修复应用异常: {e}")
+            return False
+
+    def _commit_fix(self, fix_result: Dict, module_id: str):
+        """自动 Git commit 修复"""
+        try:
+            summary = fix_result.get("summary", "auto fix")
+            commit_msg = f"auto-fix: [{module_id}] {summary}\n\n根因: {fix_result.get('root_cause', 'N/A')}\n方案: {fix_result.get('rationale', 'N/A')}"
+
+            result = subprocess.run(
+                ["git", "add", "-A"],
+                cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=30
+            )
+            result = subprocess.run(
+                ["git", "commit", "-m", commit_msg],
+                cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=30
+            )
+            if result.returncode == 0:
+                logger.info(f"✅ Git commit: {commit_msg[:80]}")
+            else:
+                logger.warning(f"Git commit 失败: {result.stderr[:200]}")
+        except Exception as e:
+            logger.warning(f"Git commit 异常: {e}")
 
     def _check_dependencies(self, module_id: str, config: ModuleConfig) -> bool:
         """检查模块依赖是否满足"""
