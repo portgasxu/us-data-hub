@@ -140,7 +140,7 @@ class LongbridgeExecutor:
 
     def get_orders(self, symbol: str = None) -> List[Dict]:
         """Get order history."""
-        args = ["orders"]
+        args = ["order", "--format", "json"]
         if symbol:
             args.append(f"{symbol.upper()}{self.symbol_suffix}")
         data = self._run(args)

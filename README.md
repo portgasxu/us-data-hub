@@ -2,11 +2,11 @@
 
 > 基于多智能体分析 + 动态阈值 + 统一风控的美股自动化交易框架
 > 
-> 🧠 **v3.3: JVS 系统大脑 + 全模块自动对接 + 订单自愈**
+> 🧠 **v3.4: Crontab 退场 + Orchestrator 统一调度 + 守护进程修复**
 
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10+-green.svg)](https://www.python.org/)
-[![Version](https://img.shields.io/badge/v3.3-JVS大脑+全模块自动对接-purple.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/v3.4-Orchestrator统一调度-purple.svg)](CHANGELOG.md)
 
 ---
 
@@ -20,6 +20,13 @@
 - **并行数据采集** — 7 只股票 × 5 数据源并行采集，耗时从 17min 降至 3-5min
 - **策略反馈闭环** — 胜率/Sharpe/回撤自动反馈 → 动态调整选股权重
 - **全链路可追溯** — Trace ID + Event Bus + 结构化日志
+
+### 🧠 v3.4 Crontab 退场 + Orchestrator 统一调度（2026-04-20）
+
+- **Crontab 全面退场** — 所有定时任务统一归 JVS 大脑管理，消除多调度冲突
+- **守护进程修复** — 价格采集和订单监控从一次性脚本改为 daemon 常驻进程
+- **订单命令修复** — `longbridge orders` → `longbridge order --format json`
+- **先斩后奏原则** — JVS 遇到问题直接排查修复，不需请示
 
 ### 🧠 v3.3 JVS 系统大脑（2026-04-20）
 
@@ -142,6 +149,8 @@ us-data-hub/
 │   ├── screen_to_trade.py      # 选股→交易流水线（带持仓去重）
 │   ├── watcher.py              # 事件驱动监控
 │   ├── calculate_factors.py    # 🆕 因子计算入口
+│   ├── price_collector_daemon.py  # 🆕 v3.4 价格采集守护进程
+│   ├── order_monitor_daemon.py    # 🆕 v3.4 订单监控守护进程
 │   └── validate_strategy.py    # 策略验证
 │
 ├── docs/                  # 文档
@@ -269,17 +278,17 @@ LONGPORT_ENVIRONMENT=live
 
 ### 管理的模块
 
-| 模块 | ID | 调度 | 关键性 |
-|------|----|------|--------|
-| 价格采集 | price_collector | */5 分钟 | 🔴 关键 |
-| 新闻监控 | watcher | */15 分钟 | 🔴 关键 |
-| 选股→交易 | screener | 每小时整点 | 🔴 关键 |
-| 全循环交易 | full_loop | */30 分钟 | 🔴 关键 |
-| 持仓监控 | holding_monitor | 每小时整点 | 🔴 关键 |
-| 订单监控 | order_monitor | */30 分钟 | 🔴 关键 |
-| 盘后复盘 | review | 05:00 | ⚪ 可选 |
-| 盘前晨报 | morning_brief | 06:00 | ⚪ 可选 |
-| 因子计算 | factors | 04:00 | ⚪ 可选 |
+| 模块 | ID | 调度模式 | 说明 |
+|------|----|----------|------|
+| 价格采集 | price_collector | **continuous (daemon)** | 每 5 分钟采集，进程常驻 |
+| 订单监控 | order_monitor | **continuous (daemon)** | 每 30 分钟检查，进程常驻 |
+| 新闻监控 | watcher | */15 分钟 | 定时任务 |
+| 选股→交易 | screener | 每小时整点 | 定时任务 |
+| 全循环交易 | full_loop | */30 分钟 | 定时任务 |
+| 持仓监控 | holding_monitor | 每小时整点 | 定时任务 |
+| 盘后复盘 | review | 05:00 | 定时任务 |
+| 盘前晨报 | morning_brief | 06:00 | 定时任务 |
+| 因子计算 | factors | 04:00 | 定时任务 |
 
 ### LLM 决策
 
@@ -369,31 +378,17 @@ if symbol in pending:
 
 ---
 
-## 📋 Crontab 调度
+## 📋 调度方式（v3.4: JVS 大脑统一管理）
+
+> ⚠️ **Crontab 已全面退场**。所有模块调度统一归 JVS 大脑管理：
+> - 每 30 秒 tick 轮询
+> - 每 5 分钟 LLM 决策
+> - 模块失败自动重启 + 超过阈值告警
+> - 价格采集/订单监控改为 daemon 常驻进程
 
 ```bash
-# 盘前（15:00-21:30）
-*/30 15-21 * * 1-5   collect (price only)
-0 16,18,20 * * 1-5   auto_execute --mode screener-to-trade
-
-# 盘中（21:30-04:00 夏令时）
-*/5  21-03 * * 1-5   collect (price + news)
-*/15 21-03 * * 1-5   watcher
-*/30 21-03 * * 1-5   auto_execute --mode full-loop
-0 22,0,2 * * 1-5    auto_execute --mode holding-monitor
-
-# 订单监控
-0 21 * * 1-5        auto_execute --mode order-monitor
-*/30 22-04 * * 1-5  auto_execute --mode order-monitor
-
-# 盘后
-0 5 * * 1-5         auto_execute --mode review
-0 6 * * 1-5         auto_execute --mode morning-brief
-0 4 * * *           calculate_factors + order_cleanup
-
-# 周度
-0 10 * * 6          validate_strategy
-*/60 * * * 0        collect (最低频)
+# v3.4: Crontab 已废弃，以下为历史参考
+# 所有调度统一归 JVS 大脑管理
 ```
 
 ---
@@ -407,7 +402,7 @@ if symbol in pending:
 | 单次完整 Loop | ~45 min | ~10-15 min |
 | 重复下单风险 | 高 | 消除（原子锁+幂等+pending去重） |
 | LLM 成本 | 全部高配 | 分级分流，降低 ~50% |
-| 模块管理 | 手动/crontab | JVS 大脑全自动 |
+| 模块管理 | 手动/crontab | JVS 大脑全自动（v3.4 Crontab 退场） |
 | 订单监控 | 无 | 实时监控+自动自愈 |
 | 信号链路 | 断裂 | 全链路打通 |
 
@@ -417,6 +412,6 @@ if symbol in pending:
 
 MIT License — 详见 [LICENSE](LICENSE)
 
-> 🧠 v3.3: JVS 系统大脑 + 全模块自动对接 + 订单自愈
+> 🧠 v3.4: Crontab 退场 + Orchestrator 统一调度 + 守护进程修复
 > 
 > 📐 详细架构图 → [docs/agent_loop_diagram_v2.md](docs/agent_loop_diagram_v2.md)

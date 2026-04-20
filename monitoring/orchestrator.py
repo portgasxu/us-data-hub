@@ -114,10 +114,10 @@ MODULE_REGISTRY: Dict[str, ModuleConfig] = {
     "price_collector": ModuleConfig(
         id="price_collector",
         name="价格采集",
-        command="python3 -m collectors.longbridge --data-type price",
+        command="python3 scripts/price_collector_daemon.py",
         critical=True,
-        run_mode="scheduled",
-        schedule="*/5",
+        run_mode="continuous",  # daemon keeps running, collects every 5 min
+        schedule="",
         description="采集实时价格数据",
     ),
     "watcher": ModuleConfig(
@@ -160,10 +160,10 @@ MODULE_REGISTRY: Dict[str, ModuleConfig] = {
     "order_monitor": ModuleConfig(
         id="order_monitor",
         name="订单监控",
-        command="python3 scripts/auto_execute.py --mode order-monitor",
+        command="python3 scripts/order_monitor_daemon.py",
         critical=True,
-        run_mode="scheduled",
-        schedule="*/30",
+        run_mode="continuous",
+        schedule="",
         description="监控pending订单状态",
     ),
     "review": ModuleConfig(

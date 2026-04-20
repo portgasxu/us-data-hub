@@ -1,8 +1,8 @@
-# 美股自动交易系统 — Agent Loop 架构图 v3.3
+# 美股自动交易系统 — Agent Loop 架构图 v3.4
 
-> 更新时间: 2026-04-20 12:40
-> 更新内容: v3.3 JVS 系统大脑 + 全模块自动对接 + 订单自愈
-> 覆盖: JVS大脑 / 订单监控 / 系统管理器 / 持仓去重 / Pending去重 / Screener-to-Trade 全链路 / 独立复盘晨报
+> 更新时间: 2026-04-20 15:00
+> 更新内容: v3.4 Crontab 退场 + Orchestrator 统一调度 + 守护进程修复
+> 覆盖: JVS大脑 / 订单监控 / 价格采集 / 系统管理器 / 持仓去重 / Pending去重 / Screener-to-Trade 全链路 / 独立复盘晨报
 
 ---
 
@@ -21,10 +21,10 @@
                     │  │  temp/brain_state.json                │    │
                     │  └──────────────────────────────────────┘    │
                     └──────────────┬───────────────────────────────┘
-                                   │ 智能调度所有模块
+                                   │ 智能调度所有模块 (Crontab 已退场)
   ┌─────────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐
   │价格采集  │ │新闻  │ │选股  │ │全循环│ │持仓  │ │订单  │
-  │ */5min  │ │监控  │ │系统  │ │交易  │ │监控  │ │监控  │
+  │ daemon  │ │监控  │ │系统  │ │交易  │ │监控  │ │daemon│
   └─────────┘ └──────┘ └──────┘ └──────┘ └──────┘ └──────┘
 
 ┌────────────────────────────────────────────────────────────────────┐
@@ -75,7 +75,16 @@
 | 因子计算入口 | `scripts/calculate_factors.py` | 🟢 新增 | 修复缺失的因子计算脚本 |
 | TradeSignal 数据结构 | `analysis/signal_schema.py` | 🟢 新增 | 统一信号数据结构 |
 
-### 1.2 v3.1 审计优化
+### 1.2 v3.4 修复
+
+| 模块 | 文件 | 状态 | 说明 |
+|------|------|------|-----------|
+| 价格采集守护进程 | `scripts/price_collector_daemon.py` | 🟢 新增 | 每 5 分钟采集，进程常驻，修复秒退问题 |
+| 订单监控守护进程 | `scripts/order_monitor_daemon.py` | 🟢 新增 | 每 30 分钟检查，进程常驻，修复秒退问题 |
+| Crontab 退场 | — | ⚪ 已废弃 | 所有调度统一归 JVS 大脑管理 |
+| Longbridge 订单命令 | `executors/longbridge.py` | 🟢 修复 | `orders` → `order --format json` |
+
+### 1.3 v3.1 审计优化
 
 | 模块 | 文件 | 状态 | 改动 |
 |------|------|------|-----------|
@@ -129,17 +138,17 @@
 
 ### 2.3 管理的模块
 
-| 模块 | ID | 调度 | 关键性 |
-|------|----|------|--------|
-| 价格采集 | price_collector | */5 分钟 | 🔴 关键 |
-| 新闻监控 | watcher | */15 分钟 | 🔴 关键 |
-| 选股→交易 | screener | 每小时整点 | 🔴 关键 |
-| 全循环交易 | full_loop | */30 分钟 | 🔴 关键 |
-| 持仓监控 | holding_monitor | 每小时整点 | 🔴 关键 |
-| 订单监控 | order_monitor | */30 分钟 | 🔴 关键 |
-| 盘后复盘 | review | 05:00 | ⚪ 可选 |
-| 盘前晨报 | morning_brief | 06:00 | ⚪ 可选 |
-| 因子计算 | factors | 04:00 | ⚪ 可选 |
+| 模块 | ID | 调度模式 | 说明 |
+|------|----|----------|------|
+| 价格采集 | price_collector | **continuous (daemon)** | 每 5 分钟采集，进程常驻 |
+| 订单监控 | order_monitor | **continuous (daemon)** | 每 30 分钟检查，进程常驻 |
+| 新闻监控 | watcher | */15 分钟 | 定时任务 |
+| 选股→交易 | screener | 每小时整点 | 定时任务 |
+| 全循环交易 | full_loop | */30 分钟 | 定时任务 |
+| 持仓监控 | holding_monitor | 每小时整点 | 定时任务 |
+| 盘后复盘 | review | 05:00 | 定时任务 |
+| 盘前晨报 | morning_brief | 06:00 | 定时任务 |
+| 因子计算 | factors | 04:00 | 定时任务 |
 
 ### 2.4 LLM 决策
 
@@ -504,10 +513,14 @@ validate_strategy.py → feedback_loop.py → screener_config.json → screener 
 
 ---
 
-## 十、Crontab 调度表（v3.3）
+## 十、Crontab 调度表（v3.4 已废弃）
 
-```bash
-# 盘前（15:00-21:30）→ 选股更新 + 简报
+> ⚠️ **v3.4 起 Crontab 已全面退场。** 所有调度统一归 JVS 大脑管理。
+> 以下为历史参考，不再维护。
+
+~~~bash
+# 以下调度已不再使用，改为 JVS 大脑统一管理
+# 盘前（15:00-21:30）
 */30 15-21 * * 1-5  collect (price only)
 0 16,18,20 * * 1-5  auto_execute --mode screener-to-trade
 
@@ -529,7 +542,7 @@ validate_strategy.py → feedback_loop.py → screener_config.json → screener 
 # 非交易日
 0 10 * * 6          validate_strategy
 */60 * * * 0        collect (最低频)
-```
+~~~
 
 ---
 
@@ -589,6 +602,15 @@ validate_strategy.py → feedback_loop.py → screener_config.json → screener 
 | 17 | Review/Morning-Brief 错误执行交易 | 独立逻辑，不执行交易 | ✅ |
 | 18 | 选股未去重持仓 | 持仓去重 + 顺延逻辑 | ✅ |
 | 19 | 一键启动缺失 | System Manager 一键启动所有 | ✅ |
+
+### v3.4 Crontab 退场 + 统一调度
+
+| # | 问题 | 修复方案 | 状态 |
+|---|------|----------|------|
+| 20 | 三套调度打架（Crontab + continuous_run + Orchestrator） | Crontab 全面退场，大脑统一调度 | ✅ |
+| 21 | 价格采集脚本秒退被误判为崩溃 | 新建守护进程 `price_collector_daemon.py` | ✅ |
+| 22 | 订单监控脚本秒退被误判为崩溃 | 新建守护进程 `order_monitor_daemon.py` | ✅ |
+| 23 | Longbridge 订单命令错误 | `orders` → `order --format json` | ✅ |
 
 ---
 
