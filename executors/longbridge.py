@@ -150,7 +150,7 @@ class LongbridgeExecutor:
 
     def cancel_order(self, order_id: str) -> bool:
         """Cancel an order by ID."""
-        result = self._run(["cancel", order_id])
+        result = self._run(["order", "cancel", order_id])
         return result is not None
 
 
